@@ -2,48 +2,48 @@
 # =============================================================================
 # k10-snapshot-janitor.sh
 #
-# OUTIL COMMUNAUTAIRE - NON SUPPORTE PAR VEEAM
-#   Projet independant, sans affiliation avec Veeam Software, ni approbation
-#   ni parrainage de sa part. Veeam, Kasten et K10 sont des marques de Veeam
-#   Software Group GmbH, citees ici au seul titre de l'identification des
-#   produits avec lesquels cet outil interagit.
-#   Fourni sans aucune garantie. Aucun canal de support editeur ne le couvre :
-#   n'ouvrez pas de ticket de support Veeam a son sujet.
-#   Cet outil SUPPRIME DES SAUVEGARDES de maniere definitive. Validez-le en
-#   lab sur vos propres versions avant toute execution avec --apply.
+# COMMUNITY TOOL - NOT SUPPORTED BY VEEAM
+#   Independent project, with no affiliation with Veeam Software and no
+#   approval or sponsorship from them. Veeam, Kasten and K10 are trademarks of
+#   Veeam Software Group GmbH, used here solely to identify the products this
+#   tool interacts with.
+#   Provided without any warranty. No vendor support channel covers it: do not
+#   open a Veeam support case about it.
+#   This tool DELETES BACKUPS permanently. Validate it in a lab against your
+#   own versions before any --apply run.
 #
-# Purge des RestorePointContents de type SNAPSHOT LOCAL restes au-dela d'un
-# seuil d'age (7 jours par defaut) sur Veeam Kasten (K10).
+# Retires local-snapshot RestorePointContents left beyond an age threshold
+# (7 days by default) on Veeam Kasten (K10).
 #
-# Cible produit  : Veeam Kasten 8.5.x / 9.0.x  (CRD apps.kio.kasten.io/v1alpha1)
-# Plateformes    : OpenShift 4.x (oc) et Kubernetes vanilla (kubectl)
-# Dependances    : oc ou kubectl, jq >= 1.6, bash >= 4, coreutils
+# Target product : Veeam Kasten 8.5.x / 9.0.x  (apps.kio.kasten.io/v1alpha1)
+# Platforms      : OpenShift 4.x (oc) and vanilla Kubernetes (kubectl)
+# Dependencies   : oc or kubectl, jq >= 1.6, bash >= 4, coreutils
 #                  (date, mktemp, rm, mkdir, wc, tr, cat, cp, mv, tee, sleep,
 #                  basename).
-#                  Ni sed, ni awk, ni grep : toute mise en forme passe par jq.
-#                  Aucune syntaxe GNU specifique, le script tourne aussi sur BSD.
+#                  No sed, no awk, no grep: all formatting goes through jq.
+#                  No GNU-specific syntax, the script also runs on BSD.
 #
-# MODELE DE DONNEES (documente, docs.kasten.io/latest/api/restorepoints) :
-#   - RestorePoint         : namespace de l'application, apps.kio.kasten.io/v1alpha1
-#   - RestorePointContent  : cluster-scoped, porte les artefacts reels
-#   - Supprimer un RestorePoint ne libere PAS les artefacts sous-jacents.
-#     Seule la suppression du RestorePointContent declenche un RetireAction
-#     qui reclame les snapshots / donnees exportees.
-#   => Ce script agit donc exclusivement sur les RestorePointContents.
+# DATA MODEL (documented, docs.kasten.io/latest/api/restorepoints):
+#   - RestorePoint         : application namespace, apps.kio.kasten.io/v1alpha1
+#   - RestorePointContent  : cluster-scoped, carries the actual artifacts
+#   - Deleting a RestorePoint does NOT release the underlying artifacts.
+#     Only deleting the RestorePointContent triggers a RetireAction that
+#     reclaims the snapshots and exported data.
+#   => This script therefore acts exclusively on RestorePointContents.
 #
-# DISCRIMINATION SNAPSHOT vs EXPORT :
-#   Les restore points exportes vers un location profile portent le label
-#   k10.kasten.io/exportProfile. Absence de ce label = snapshot local.
-#   Le script ne supprime QUE les objets sans ce label (--include-exports
-#   existe mais est volontairement non recommande).
+# SNAPSHOT vs EXPORT DISCRIMINATOR:
+#   Restore points exported to a location profile carry the label
+#   k10.kasten.io/exportProfile. Absence of that label = local snapshot.
+#   The script only deletes objects without it (--include-exports exists but
+#   is deliberately discouraged).
 #
-# AVERTISSEMENT (docs.kasten.io) :
+# WARNING (docs.kasten.io):
 #   "Deletion of a RestorePointContent is permanent and overrides retention
 #    by a Policy."
-#   Confirmer qu'un restore point n'est plus necessaire avant de le supprimer.
+#   Confirm a restore point is no longer needed before deleting it.
 #
-# Codes retour : 0 succes | 1 erreur | 2 plafond de suppression depasse (--apply)
-#                3 prerequis manquant
+# Exit codes : 0 success | 1 error | 2 deletion cap exceeded (--apply)
+#              3 missing prerequisite
 # =============================================================================
 
 set -Eeuo pipefail
@@ -61,28 +61,27 @@ readonly LBL_APPTYPE="k10.kasten.io/appType"
 readonly LBL_POLICY="k10.kasten.io/policyName"
 readonly LBL_POLICY_NS="k10.kasten.io/policyNamespace"
 readonly LBL_RUN="k10.kasten.io/runActionName"
-# Cle du label d'exemption. Surchargeable via --exempt-label uniquement, et
-# volontairement PAS depuis l'environnement : le CronJob monte sa ConfigMap
-# avec envFrom, donc toute cle qui y serait ajoutee deviendrait une variable
-# d'environnement. Un LBL_EXEMPT pose la desactiverait en silence toutes les
-# exemptions posees sur les objets.
+# Exemption label key. Overridable through --exempt-label only, and
+# deliberately NOT from the environment: the CronJob mounts its ConfigMap with
+# envFrom, so any key added there becomes an environment variable. An
+# LBL_EXEMPT placed there would silently void every exemption in the cluster.
 LBL_EXEMPT="k10-janitor/exempt"
 
-# ----------------------------- Valeurs par defaut ----------------------------
-# usage() est appelee depuis la boucle de parsing : sans copie figee, un
-# "--min-keep 5 -h" afficherait "defaut: 5". On garde donc les defauts a part.
+# -------------------------------- Defaults -----------------------------------
+# usage() is called from inside the parsing loop: without a frozen copy,
+# "--min-keep 5 -h" would advertise "default: 5". Keep the defaults separate.
 RETENTION_DAYS=7
 K10_NAMESPACE="${K10_NAMESPACE:-kasten-io}"
 CLI=""
-DRY_RUN=1                # dry-run par defaut : suppression uniquement avec --apply
-MAX_DELETIONS=50          # 0 = illimite
-MIN_KEEP=1                # nb de snapshots les plus recents toujours conserves par application
-REQUIRE_UNBOUND=0         # 1 = ne cibler que les RPC dont l'application a disparu
-ORPHAN_POLICY_ONLY=0      # 1 = ne cibler que les RPC sans policy ou dont la policy n'existe plus
-POLICY_COUNT="?"          # nombre de policies K10 lues, "?" si la lecture a echoue
-OVER_CAP=0                # 1 = candidats au-dela de --max-deletions
-INCLUDE_EXPORTS=0         # 1 = inclure aussi les restore points exportes (deconseille)
-WAIT_RETIRE=0             # secondes d'attente de completion des RetireActions
+DRY_RUN=1                 # dry-run by default: deletion only with --apply
+MAX_DELETIONS=50          # 0 = unlimited
+MIN_KEEP=1                # most recent snapshots always kept, per application
+REQUIRE_UNBOUND=0         # 1 = only target RPC whose application is gone
+ORPHAN_POLICY_ONLY=0      # 1 = only target RPC with no policy, or a deleted one
+POLICY_COUNT="?"          # K10 policies read, "?" if the read failed
+OVER_CAP=0                # 1 = candidates beyond --max-deletions
+INCLUDE_EXPORTS=0         # 1 = also include exported restore points (discouraged)
+WAIT_RETIRE=0             # seconds to wait for RetireActions to complete
 REPORT_DIR="${REPORT_DIR:-./k10-janitor-reports}"
 METRICS_FILE=""
 QUIET=0
@@ -101,16 +100,15 @@ warn() { printf '%s [%-5s] %s\n' "$(_ts)" "WARN" "$*" >&2; }
 err()  { printf '%s [%-5s] %s\n' "$(_ts)" "ERROR" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
-# Invariant : les codes retour restent 0, 1, 2 ou 3. Sans ce piege, l'echec
-# d'un jq ou d'un utilitaire propage son propre code via 'set -e' (jq sort en
-# 5 sur une erreur de programme). 'set -E' plus haut le fait suivre dans les
-# fonctions et les sous-shells.
+# Invariant: exit codes stay 0, 1, 2 or 3. Without this trap, a failing jq or
+# utility propagates its own code through 'set -e' (jq exits 5 on a program
+# error). 'set -E' above makes the trap follow into functions and subshells.
 #
-# PORTEE REELLE, a connaitre : bash suspend errexit ET ce piege dans toute
-# fonction appelee au sein d'une liste '||' ou '&&', ou en condition de 'if'.
-# C'est le cas de purge() dans main(), appelee en 'purge || rc=$?'. Aucun
-# echec n'y remonte tout seul : purge() teste donc chacun des siens.
-trap 'err "Erreur inattendue (ligne $LINENO)"; exit 1' ERR
+# ACTUAL SCOPE, worth knowing: bash suspends errexit AND this trap inside any
+# function invoked within a '||' or '&&' list, or as an 'if' condition. That is
+# the case for purge() in main(), called as 'purge || rc=$?'. No failure
+# surfaces on its own there, so purge() checks every one of its own.
+trap 'err "Unexpected error (line $LINENO)"; exit 1' ERR
 
 readonly DEF_RETENTION_DAYS="$RETENTION_DAYS"
 readonly DEF_MIN_KEEP="$MIN_KEEP"
@@ -120,70 +118,70 @@ readonly DEF_REPORT_DIR="$REPORT_DIR"
 
 usage() {
   cat <<EOF
-$SCRIPT_NAME v$SCRIPT_VERSION - purge des snapshots K10 au-dela d'un seuil d'age
+$SCRIPT_NAME v$SCRIPT_VERSION - retire K10 snapshots past an age threshold
 
 USAGE
   $SCRIPT_NAME [options]
 
 SELECTION
-  -d, --retention-days N     Age minimum en jours pour qu'un snapshot soit candidat (defaut: $DEF_RETENTION_DAYS)
-      --require-unbound      Ne cibler que les RestorePointContents en state Unbound
-                             (application/namespace supprime cote cluster)
-      --orphan-policy-only   Ne cibler que les RPC sans label $LBL_POLICY
-                             ou dont la policy referencee n'existe plus
-      --include-exports      Inclure aussi les restore points exportes (DECONSEILLE)
-      --include-namespace NS Restreindre a ce namespace applicatif (repetable)
-      --exclude-namespace NS Exclure ce namespace applicatif (repetable)
-      --exclude-policy NAME  Exclure les RPC issus de cette policy (repetable)
-      --exclude-app NAME     Exclure cette application (repetable)
+  -d, --retention-days N     Minimum age in days for a snapshot to be a candidate (default: $DEF_RETENTION_DAYS)
+      --require-unbound      Only target RestorePointContents in state Unbound
+                             (application or namespace deleted from the cluster)
+      --orphan-policy-only   Only target RPC with no $LBL_POLICY label,
+                             or whose referenced policy no longer exists
+      --include-exports      Also include exported restore points (DISCOURAGED)
+      --include-namespace NS Restrict to this application namespace (repeatable)
+      --exclude-namespace NS Exclude this application namespace (repeatable)
+      --exclude-policy NAME  Exclude RPC created by this policy (repeatable)
+      --exclude-app NAME     Exclude this application (repeatable)
 
-GARDE-FOUS
-      --apply                Executer reellement les suppressions (sinon dry-run)
-      --dry-run              Forcer le dry-run. Utile pour neutraliser un
-                             --apply place plus tot dans la ligne de commande
-      --min-keep N           Toujours conserver les N snapshots les plus recents
-                             par application, meme hors retention (defaut: $DEF_MIN_KEEP)
-      --max-deletions N      Sous --apply, abandonner si le nombre de candidats
-                             depasse N. En dry-run, le depassement est signale
-                             mais le code retour reste 0.
-                             (defaut: $DEF_MAX_DELETIONS, 0 = illimite)
-      --wait-retire SEC      Attendre jusqu'a SEC la completion des RetireActions
-      --exempt-label KEY     Cle du label d'exemption (defaut: $LBL_EXEMPT)
+GUARDS
+      --apply                Actually perform the deletions (dry-run otherwise)
+      --dry-run              Force dry-run. Useful to neutralise an --apply
+                             placed earlier on the command line
+      --min-keep N           Always keep the N most recent snapshots per
+                             application, even past retention (default: $DEF_MIN_KEEP)
+      --max-deletions N      Under --apply, abort if the number of candidates
+                             exceeds N. In dry-run the overflow is reported but
+                             the exit code stays 0.
+                             (default: $DEF_MAX_DELETIONS, 0 = unlimited)
+      --wait-retire SEC      Wait up to SEC for the RetireActions to complete
+      --exempt-label KEY     Exemption label key (default: $LBL_EXEMPT)
 
-ENVIRONNEMENT
-  -n, --k10-namespace NS     Namespace d'installation de K10 (defaut: $DEF_K10_NAMESPACE)
-      --cli oc|kubectl       Forcer le binaire (defaut: autodetection OpenShift)
+ENVIRONMENT
+  -n, --k10-namespace NS     Namespace where K10 is installed (default: $DEF_K10_NAMESPACE)
+      --cli oc|kubectl       Force the binary (default: OpenShift autodetection)
 
-SORTIES
-  -r, --report-dir DIR       Repertoire des rapports (defaut: $DEF_REPORT_DIR)
-      --metrics-file PATH    Ecrire les metriques Prometheus (textfile collector)
-  -q, --quiet                Silencieux (erreurs uniquement)
-  -h, --help                 Cette aide
+OUTPUT
+  -r, --report-dir DIR       Report directory (default: $DEF_REPORT_DIR)
+      --metrics-file PATH    Write Prometheus metrics (textfile collector)
+  -q, --quiet                Quiet, errors only
+  -h, --help                 This help
 
-EXEMPLES
-  # Identification seule, seuil 7 jours
+EXAMPLES
+  # Report only, 7-day threshold
   $SCRIPT_NAME --retention-days 7
 
-  # Purge reelle des snapshots > 14 jours, hors namespaces prod
+  # Actually retire snapshots older than 14 days, outside the prod namespaces
   $SCRIPT_NAME -d 14 --exclude-namespace prod-db --exclude-namespace prod-app --apply
 
-  # Mode conservateur : uniquement les orphelins reels (app supprimee ou policy disparue)
+  # Conservative mode: genuine orphans only (application or policy gone)
   $SCRIPT_NAME -d 7 --require-unbound --orphan-policy-only --apply
 
-EXEMPTION PAR OBJET
-  Ajouter le label $LBL_EXEMPT=true sur un RestorePointContent
-  pour l'exclure definitivement de la purge :
-    <cli> label $RPC_CRD <nom> $LBL_EXEMPT=true
+PER-OBJECT EXEMPTION
+  Add the label $LBL_EXEMPT=true to a RestorePointContent to exclude it
+  from the purge permanently:
+    <cli> label $RPC_CRD <name> $LBL_EXEMPT=true
 
-AVERTISSEMENT
-  Outil communautaire, non supporte par Veeam. Projet independant, sans
-  affiliation avec Veeam Software. Fourni sans aucune garantie.
-  Cet outil supprime des sauvegardes de maniere definitive : validez-le en
-  lab sur votre version avant toute execution avec --apply.
+WARNING
+  Community tool, not supported by Veeam. Independent project, with no
+  affiliation with Veeam Software. Provided without any warranty.
+  This tool deletes backups permanently: validate it in a lab against your
+  own version before any --apply run.
 EOF
 }
 
-# ------------------------------ Parsing des args -----------------------------
+# ----------------------------- Argument parsing ------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -d|--retention-days)   RETENTION_DAYS="${2:?}"; shift 2 ;;
@@ -210,26 +208,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || die "--retention-days doit etre un entier"
-[[ "$MIN_KEEP"       =~ ^[0-9]+$ ]] || die "--min-keep doit etre un entier"
-# Invariant : aucune application ne doit pouvoir se retrouver sans aucun point
-# de restauration. --min-keep 0 desactiverait la garde de rang.
-[[ "$MIN_KEEP" -ge 1 ]] || die "--min-keep doit etre >= 1 (une application ne peut pas rester sans point de restauration)"
-[[ "$MAX_DELETIONS"  =~ ^[0-9]+$ ]] || die "--max-deletions doit etre un entier"
-[[ "$WAIT_RETIRE"    =~ ^[0-9]+$ ]] || die "--wait-retire doit etre un entier"
+[[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || die "--retention-days must be an integer"
+[[ "$MIN_KEEP"       =~ ^[0-9]+$ ]] || die "--min-keep must be an integer"
+# Invariant: no application may end up with no restore point at all.
+# --min-keep 0 would disable the rank guard entirely.
+[[ "$MIN_KEEP" -ge 1 ]] || die "--min-keep must be >= 1 (no application may be left without a restore point)"
+[[ "$MAX_DELETIONS"  =~ ^[0-9]+$ ]] || die "--max-deletions must be an integer"
+[[ "$WAIT_RETIRE"    =~ ^[0-9]+$ ]] || die "--wait-retire must be an integer"
 
 # -------------------------- Prerequis / autodetection ------------------------
 detect_cli() {
   if [[ -n "$CLI" ]]; then
-    command -v "$CLI" >/dev/null 2>&1 || { err "Binaire '$CLI' introuvable"; exit 3; }
-    log "CLI force : $CLI"
+    command -v "$CLI" >/dev/null 2>&1 || { err "Binary '$CLI' not found"; exit 3; }
+    log "CLI forced: $CLI"
     return
   fi
   # OpenShift : presence de oc ET de l'API config.openshift.io (clusterversion)
   if command -v oc >/dev/null 2>&1 && \
      oc get clusterversion version >/dev/null 2>&1; then
     CLI="oc"
-    log "Cluster OpenShift detecte -> utilisation de 'oc'"
+    log "OpenShift cluster detected -> using 'oc'"
   elif command -v oc >/dev/null 2>&1 && \
        oc api-resources --api-group=config.openshift.io -o name >/dev/null 2>&1 && \
        [[ -n "$(oc api-resources --api-group=config.openshift.io -o name 2>/dev/null)" ]]; then
@@ -240,27 +238,27 @@ detect_cli() {
     log "Cluster Kubernetes vanilla -> utilisation de 'kubectl'"
   elif command -v oc >/dev/null 2>&1; then
     CLI="oc"
-    warn "kubectl absent, repli sur 'oc' en mode Kubernetes generique"
+    warn "kubectl not found, falling back to 'oc' in generic Kubernetes mode"
   else
-    err "Ni 'oc' ni 'kubectl' trouve dans le PATH"; exit 3
+    err "Neither 'oc' nor 'kubectl' found in PATH"; exit 3
   fi
 }
 
 check_prereqs() {
-  command -v jq >/dev/null 2>&1 || { err "'jq' est requis (>= 1.6)"; exit 3; }
+  command -v jq >/dev/null 2>&1 || { err "'jq' is required (>= 1.6)"; exit 3; }
   detect_cli
   "$CLI" version --request-timeout=15s >/dev/null 2>&1 \
-    || { err "Impossible de joindre l'API Kubernetes avec '$CLI'"; exit 3; }
-  # RestorePointContent est servi par une APIService agregee
-  # (v1alpha1.apps.kio.kasten.io -> kasten-io/aggregatedapis-svc), pas par un
-  # CRD : 'get crd' echoue donc sur une installation Kasten normale. Verifie
-  # sur K10 9.0.3. Le message reste informatif, la vraie verification est la
-  # lecture des objets dans fetch_data, qui echoue avec un message explicite.
+    || { err "Cannot reach the Kubernetes API with '$CLI'"; exit 3; }
+  # RestorePointContent is served by an aggregated APIService
+  # (v1alpha1.apps.kio.kasten.io -> kasten-io/aggregatedapis-svc), not by a
+  # CRD, so 'get crd' fails on a normal Kasten install. Verified on K10 9.0.3.
+  # This stays informational; the real check is reading the objects in
+  # fetch_data, which fails with an explicit message.
   if ! "$CLI" get crd "$RPC_CRD" >/dev/null 2>&1; then
-    log "$RPC_CRD hors CRD (API agregee Kasten attendue) - poursuite"
+    log "$RPC_CRD is not a CRD (Kasten aggregated API expected) - continuing"
   fi
-  # Le label porte la version lisible ; l'image est souvent referencee par
-  # digest et n'apprend rien. Verifie sur K10 9.0.3 : label = "9.0.3", image =
+  # The label carries the readable version; the image is often referenced by
+  # digest and teaches nothing. Verified on K10 9.0.3: label = "9.0.3", image =
   # registry.connect.redhat.com/kasten/aggregatedapis@sha256:...
   local v
   v="$("$CLI" -n "$K10_NAMESPACE" get deploy -l app=k10 \
@@ -269,9 +267,9 @@ check_prereqs() {
     v="$("$CLI" -n "$K10_NAMESPACE" get deploy -l app=k10 \
           -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || true)"
   fi
-  # Un 'if' et non 'cmd && cmd' : en derniere instruction d'une fonction
-  # appelee nue sous 'set -e', un test faux fait sortir tout le script.
-  if [[ -n "$v" ]]; then log "Version K10 detectee : $v"; fi
+  # An 'if', not 'cmd && cmd': as the last statement of a function called
+  # bare under 'set -e', a false test makes the whole script exit.
+  if [[ -n "$v" ]]; then log "K10 version detected: $v"; fi
 }
 
 # ------------------------------- Collecte K10 --------------------------------
@@ -280,46 +278,46 @@ cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
 
 fetch_data() {
-  log "Collecte des $RPC_CRD (cluster-scoped)..."
+  log "Collecting $RPC_CRD (cluster-scoped)..."
   "$CLI" get "$RPC_CRD" -o json > "$WORKDIR/rpc.json" \
-    || die "Echec de la lecture des $RPC_CRD (verifier les droits RBAC 'list')"
+    || die "Failed to read $RPC_CRD (check the 'list' RBAC permission)"
   local total
   total="$(jq '.items | length' "$WORKDIR/rpc.json")"
-  log "$total RestorePointContents recuperes"
+  log "$total RestorePointContents retrieved"
 
-  log "Collecte des policies K10 dans '$K10_NAMESPACE'..."
+  log "Collecting K10 policies in '$K10_NAMESPACE'..."
   if "$CLI" -n "$K10_NAMESPACE" get "$POLICY_CRD" -o json > "$WORKDIR/policies.json" 2>/dev/null; then
     jq '[.items[].metadata.name]' "$WORKDIR/policies.json" > "$WORKDIR/policy_names.json"
     POLICY_COUNT="$(jq 'length' "$WORKDIR/policy_names.json")"
-    log "$POLICY_COUNT policies actives"
-    # Zero policy rend --orphan-policy-only inoperant : plus aucune policy de
-    # reference, donc tout snapshot parait orphelin. Cas atteignable avec un
-    # --k10-namespace errone, le CRD des RPC etant cluster-scoped : la requete
-    # namespacee reussit alors avec zero resultat.
+    log "$POLICY_COUNT active policies"
+    # Zero policies makes --orphan-policy-only inoperative: with no reference
+    # policy left, every snapshot looks orphaned. Reachable with a wrong
+    # --k10-namespace, since the RPC resource is cluster-scoped: the namespaced
+    # query then succeeds with zero results.
     if [[ $ORPHAN_POLICY_ONLY -eq 1 && "$POLICY_COUNT" -eq 0 ]]; then
-      err "--orphan-policy-only demande, mais aucune policy trouvee dans '$K10_NAMESPACE'."
-      err "Sans policy de reference, tout snapshot serait vu comme orphelin. Verifier --k10-namespace."
+      err "--orphan-policy-only requested, but no policy found in '$K10_NAMESPACE'."
+      err "With no reference policy, every snapshot would look orphaned. Check --k10-namespace."
       exit 3
     fi
   else
     echo 'null' > "$WORKDIR/policy_names.json"
-    # Le filtre est restrictif : le retirer elargirait le perimetre de
-    # suppression. On abandonne plutot que de degrader en silence.
+    # The filter is restrictive: dropping it would widen the deletion scope.
+    # Abort rather than degrade silently.
     if [[ $ORPHAN_POLICY_ONLY -eq 1 ]]; then
-      err "--orphan-policy-only demande, mais les policies sont illisibles dans '$K10_NAMESPACE'."
-      err "Refus de poursuivre sans le filtre : verifier le droit RBAC 'list' sur $POLICY_CRD."
+      err "--orphan-policy-only requested, but the policies are unreadable in '$K10_NAMESPACE'."
+      err "Refusing to continue without the filter: check the 'list' RBAC permission on $POLICY_CRD."
       exit 3
     fi
-    warn "Policies illisibles - le filtre d'orphelinage par policy est indisponible"
+    warn "Policies unreadable - the policy-orphan filter is unavailable"
   fi
 }
 
-json_array() { # transforme les args en tableau JSON
+json_array() { # turns the arguments into a JSON array
   if [[ $# -eq 0 ]]; then echo '[]'; else printf '%s\n' "$@" | jq -R . | jq -s .; fi
 }
 
 # ---------------------------- Moteur de decision -----------------------------
-# Produit un JSONL : un objet par RestorePointContent, champ .decision =
+# Produces JSONL: one object per RestorePointContent, with .decision =
 #   DELETE | KEEP, et .reason explicite. Aucune mutation ici.
 evaluate() {
   local ex_ns in_ns ex_pol ex_app
@@ -351,15 +349,15 @@ evaluate() {
     '
     def norm_ts:
       # type != "string" couvre null, nombre, booleen, tableau, objet : sub()
-      # leverait une erreur non rattrapable sur ces types.
+      # would raise an uncatchable error on those types.
       if (type != "string") or . == "" then null
-      # fromdateiso8601 de jq accepte uniquement le suffixe Z. On retire donc
-      # les fractions de seconde avant un Z, et rien de plus : un horodatage
-      # porteur de decalage numerique (+02:00, -04:00) reste non parsable et
-      # tombe en KEEP timestamp-unparseable. Choix delibere : convertir le
-      # decalage a la main risquerait de vieillir un objet, donc de le
-      # supprimer. Verifie sur K10 9.0.3 : tous les horodatages sont en Z.
-      # NB : pas d apostrophe dans ce bloc, il vit dans une chaine simple-quotee.
+      # jq fromdateiso8601 accepts the Z suffix only. So we strip fractional
+      # seconds before a Z, and nothing else: a timestamp carrying a numeric
+      # offset (+02:00, -04:00) stays unparsable and falls to
+      # KEEP timestamp-unparseable. Deliberate: converting the offset by hand
+      # could age an object, and therefore delete it. Verified on K10 9.0.3,
+      # every timestamp is Z-suffixed.
+      # NOTE: no apostrophe in this block, it lives in a single-quoted string.
       else sub("\\.[0-9]+Z$"; "Z") end;
     def to_epoch:
       norm_ts | if . == null then null
@@ -394,9 +392,9 @@ evaluate() {
         | .refEpoch = (.refTime | to_epoch)
         | .ageDays  = (if .refEpoch == null then null
                        else (($NOW - .refEpoch) / 86400 * 100 | floor) / 100 end)
-        # Discriminant = PRESENCE du label, pas sa valeur : Kubernetes autorise
-        # un label a valeur vide, et en jq seuls null et false sont falsy,
-        # donc la chaine vide traversait le // et passait pour un snapshot.
+        # Discriminator = label PRESENCE, not its value. Kubernetes allows an
+        # empty label value, and in jq only null and false are falsy, so the
+        # empty string flowed through the // and passed for a snapshot.
         | .kind     = (if .hasExport then "export" else "snapshot" end)
         | .appKey   = (if .appNamespace == "" then "<unknown>" else .appNamespace end)
                       + "/" + (if .appName == "" then "<unknown>" else .appName end)
@@ -405,7 +403,7 @@ evaluate() {
                            elif $policies == null then true
                            else (.policyName as $p | ($policies | index($p)) != null) end)
       ]
-    # rang par application, du plus recent au plus ancien, sur le perimetre eligible
+    # rank per application, newest to oldest, over the eligible scope only
     | ( [ .[] | select(.kind == "snapshot" or $includeExports == 1) ]
         | group_by(.appKey)
         | map( sort_by(.refEpoch // 0) | reverse
@@ -453,7 +451,7 @@ evaluate() {
 
 # -------------------------------- Rapports -----------------------------------
 write_reports() {
-  mkdir -p "$REPORT_DIR" || die "Repertoire de rapport inaccessible : $REPORT_DIR"
+  mkdir -p "$REPORT_DIR" || die "Report directory not writable: $REPORT_DIR"
   local base="$REPORT_DIR/k10-janitor-$RUN_ID"
   REPORT_CSV="$base.csv"
   REPORT_JSONL="$base.jsonl"
@@ -472,8 +470,8 @@ write_reports() {
       ] | @csv' "$WORKDIR/decisions.jsonl"
   } > "$REPORT_CSV"
 
-  log "Rapport CSV   : $REPORT_CSV"
-  log "Rapport JSONL : $REPORT_JSONL"
+  log "CSV report   : $REPORT_CSV"
+  log "JSONL report : $REPORT_JSONL"
 }
 
 summarize() {
@@ -486,27 +484,27 @@ summarize() {
 
   {
     echo "=============================================================="
-    echo " Veeam Kasten - purge des snapshots au-dela du seuil d'age"
+    echo " Veeam Kasten - retiring snapshots past the age threshold"
     echo " run_id            : $RUN_ID"
     echo " cli               : $CLI"
-    echo " namespace K10     : $K10_NAMESPACE"
-    echo " seuil retention   : ${RETENTION_DAYS} jours"
-    echo " mode              : $([[ $DRY_RUN -eq 1 ]] && echo 'DRY-RUN (aucune suppression)' || echo 'APPLY (suppression reelle)')"
-    echo " min-keep          : $MIN_KEEP snapshot(s) recent(s) par application"
-    echo " max-deletions     : $([[ $MAX_DELETIONS -eq 0 ]] && echo 'illimite' || echo "$MAX_DELETIONS")$([[ $OVER_CAP -eq 1 ]] && echo "  (DEPASSE : $CANDIDATES candidats, un --apply serait refuse)" || echo '')"
+    echo " K10 namespace     : $K10_NAMESPACE"
+    echo " retention days    : ${RETENTION_DAYS}"
+    echo " mode              : $([[ $DRY_RUN -eq 1 ]] && echo 'DRY-RUN (nothing deleted)' || echo 'APPLY (real deletion)')"
+    echo " min-keep          : $MIN_KEEP recent snapshot(s) per application"
+    echo " max-deletions     : $([[ $MAX_DELETIONS -eq 0 ]] && echo 'unlimited' || echo "$MAX_DELETIONS")$([[ $OVER_CAP -eq 1 ]] && echo "  (OVER CAP: $CANDIDATES candidates, an --apply would be refused)" || echo '')"
     echo " require-unbound   : $REQUIRE_UNBOUND"
     echo " orphan-policy-only: $ORPHAN_POLICY_ONLY"
-    echo " policies K10 lues : $POLICY_COUNT"
+    echo " K10 policies read : $POLICY_COUNT"
     echo "--------------------------------------------------------------"
-    echo " RestorePointContents inventories : $TOTAL"
-    echo "   dont snapshots locaux          : $SNAPSHOTS"
-    echo "   dont exports (jamais purges)   : $EXPORTS"
-    echo " Candidats a la suppression       : $CANDIDATES"
-    echo " Taille physique candidate        : $RECLAIM_BYTES octets"
+    echo " RestorePointContents inventoried : $TOTAL"
+    echo "   of which local snapshots       : $SNAPSHOTS"
+    echo "   of which exports (never purged): $EXPORTS"
+    echo " Deletion candidates              : $CANDIDATES"
+    echo " Candidate physical size          : $RECLAIM_BYTES bytes"
     echo "--------------------------------------------------------------"
-    echo " Repartition des decisions KEEP :"
-    # Agrege en jq plutot que par 'sort | uniq -c | sort -rn | sed' : cela
-    # retire sed, seul binaire du script hors bash, jq, oc/kubectl et coreutils.
+    echo " KEEP decisions by reason :"
+    # Aggregated in jq rather than 'sort | uniq -c | sort -rn | sed': that
+    # removes sed, the only binary outside bash, jq, oc/kubectl and coreutils.
     jq -rs '
       def lpad($n): tostring | if ($n - length) > 0
                                then (" " * ($n - length)) + . else . end;
@@ -515,12 +513,12 @@ summarize() {
       | .[] | "   \(.n | lpad(4)) \(.reason)"' "$WORKDIR/decisions.jsonl"
     echo "--------------------------------------------------------------"
     if [[ "$CANDIDATES" -gt 0 ]]; then
-      echo " Candidats (age_days | namespace/app | policy | rpc) :"
+      echo " Candidates (age_days | namespace/app | policy | rpc) :"
       jq -r 'select(.decision=="DELETE")
-             | "   \(.ageDays)j | \(.appNamespace)/\(.appName) | \(if .policyName=="" then "<on-demand>" else .policyName end) | \(.name)"' \
+             | "   \(.ageDays)d | \(.appNamespace)/\(.appName) | \(if .policyName=="" then "<on-demand>" else .policyName end) | \(.name)"' \
         "$WORKDIR/decisions.jsonl"
     else
-      echo " Aucun candidat."
+      echo " No candidate."
     fi
     echo "=============================================================="
   } | tee "${REPORT_SUMMARY:-/dev/null}" >&2
@@ -530,45 +528,45 @@ write_metrics() {
   if [[ -z "$METRICS_FILE" ]]; then return 0; fi
   local tmp="${METRICS_FILE}.$$"
   if ! cat > "$tmp" <<EOF
-# HELP k10_janitor_last_run_timestamp_seconds Horodatage de la derniere execution.
+# HELP k10_janitor_last_run_timestamp_seconds Timestamp of the last run.
 # TYPE k10_janitor_last_run_timestamp_seconds gauge
 k10_janitor_last_run_timestamp_seconds $(date -u +%s)
-# HELP k10_janitor_dry_run 1 si la derniere execution etait en dry-run.
+# HELP k10_janitor_dry_run 1 if the last run was a dry-run.
 # TYPE k10_janitor_dry_run gauge
 k10_janitor_dry_run $DRY_RUN
-# HELP k10_janitor_retention_days Seuil d'age applique.
+# HELP k10_janitor_retention_days Age threshold applied.
 # TYPE k10_janitor_retention_days gauge
 k10_janitor_retention_days $RETENTION_DAYS
-# HELP k10_janitor_restorepointcontents_total Inventaire total.
+# HELP k10_janitor_restorepointcontents_total Total inventory.
 # TYPE k10_janitor_restorepointcontents_total gauge
 k10_janitor_restorepointcontents_total $TOTAL
-# HELP k10_janitor_candidates_total Nombre de candidats identifies.
+# HELP k10_janitor_candidates_total Number of candidates identified.
 # TYPE k10_janitor_candidates_total gauge
 k10_janitor_candidates_total $CANDIDATES
-# HELP k10_janitor_over_cap 1 si les candidats depassent --max-deletions.
+# HELP k10_janitor_over_cap 1 if candidates exceed --max-deletions.
 # TYPE k10_janitor_over_cap gauge
 k10_janitor_over_cap $OVER_CAP
-# HELP k10_janitor_deleted_total Nombre de suppressions reussies.
+# HELP k10_janitor_deleted_total Number of successful deletions.
 # TYPE k10_janitor_deleted_total gauge
 k10_janitor_deleted_total ${DELETED:-0}
-# HELP k10_janitor_failed_total Nombre de suppressions en echec.
+# HELP k10_janitor_failed_total Number of failed deletions.
 # TYPE k10_janitor_failed_total gauge
 k10_janitor_failed_total ${FAILED:-0}
-# HELP k10_janitor_reclaimable_bytes Taille physique cumulee des candidats.
+# HELP k10_janitor_reclaimable_bytes Cumulated physical size of the candidates.
 # TYPE k10_janitor_reclaimable_bytes gauge
 k10_janitor_reclaimable_bytes $RECLAIM_BYTES
 EOF
   then
-    warn "Ecriture des metriques impossible : $tmp"
+    warn "Cannot write metrics: $tmp"
     rm -f "$tmp"
     return 1
   fi
   if ! mv "$tmp" "$METRICS_FILE"; then
-    warn "Deplacement des metriques impossible vers $METRICS_FILE"
+    warn "Cannot move metrics into place: $METRICS_FILE"
     rm -f "$tmp"
     return 1
   fi
-  log "Metriques Prometheus : $METRICS_FILE"
+  log "Prometheus metrics: $METRICS_FILE"
 }
 
 # ------------------------------- Suppression ----------------------------------
@@ -577,44 +575,44 @@ purge() {
   FAILED=0
 
   if [[ "$CANDIDATES" -eq 0 ]]; then
-    log "Rien a supprimer."
+    log "Nothing to delete."
     return 0
   fi
 
-  # Le garde-fou de l'invariant 6 ne doit dependre d'aucun ordre d'appel.
-  # summarize() calcule le meme OVER_CAP pour le rapport et les metriques ;
-  # purge() ne lui fait pas confiance et recalcule pour son propre compte.
+  # The invariant 6 guard must not depend on any call order. summarize()
+  # computes the same OVER_CAP for the report and the metrics; purge() does not
+  # trust it and recomputes for itself.
   local over_cap=0
   if [[ "$MAX_DELETIONS" -gt 0 && "$CANDIDATES" -gt "$MAX_DELETIONS" ]]; then
     over_cap=1
   fi
 
-  # Le plafond est un frein a la suppression : il n'a de sens que la ou une
-  # suppression peut avoir lieu. En dry-run le rapport sort complet, le
-  # depassement est signale, et le code retour reste 0 - sinon le tout premier
-  # run planifie sur un cluster reellement encrasse marque le Job en echec.
+  # The cap is a brake on deletion, so it only makes sense where a deletion can
+  # happen. In dry-run the report comes out complete, the overflow is reported,
+  # and the exit code stays 0 - otherwise the very first scheduled run against
+  # a cluster with real backlog marks the Job as Failed.
   if [[ $DRY_RUN -eq 1 ]]; then
     log "DRY-RUN : $CANDIDATES RestorePointContents seraient supprimes. Aucune action effectuee."
     if [[ $over_cap -eq 1 ]]; then
       warn "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : un --apply serait refuse en l'etat."
     fi
-    log "Relancer avec --apply pour executer la purge."
+    log "Re-run with --apply to perform the purge."
     return 0
   fi
 
   if [[ $over_cap -eq 1 ]]; then
-    err "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : abandon par securite."
-    err "Verifier le rapport, puis relancer avec un plafond adapte si le resultat est attendu."
+    err "$CANDIDATES candidates > --max-deletions=$MAX_DELETIONS cap: aborting for safety."
+    err "Review the report, then re-run with a suitable cap if the result is expected."
     return 2
   fi
 
   warn "APPLY : suppression de $CANDIDATES RestorePointContents."
-  warn "La suppression est definitive et prime sur la retention des policies."
+  warn "Deletion is permanent and overrides policy retention."
 
-  # purge() est appelee en 'purge || rc=$?' : bash y suspend errexit ET le
-  # piege ERR pour toute la duree de la fonction. Aucun echec ne remonte tout
-  # seul ici, chacun doit donc etre teste explicitement. C'est la seule
-  # fonction qui supprime : un echec avale y serait une perte de trace.
+  # purge() is called as 'purge || rc=$?': bash suspends errexit AND the ERR
+  # trap for the whole duration of the function. No failure surfaces on its
+  # own here, so each one is checked explicitly. This is the only function that
+  # deletes: a swallowed failure would be a lost record.
   local name audit_errors=0
   while IFS= read -r name; do
     if [[ -z "$name" ]]; then continue; fi
@@ -628,7 +626,7 @@ purge() {
       fi
     else
       FAILED=$((FAILED + 1))
-      err "Echec suppression $name : $(tr '\n' ' ' < "$WORKDIR/del.err")"
+      err "Failed to delete $name: $(tr '\n' ' ' < "$WORKDIR/del.err")"
       if ! jq -c --arg n "$name" --arg ts "$(_ts)" --arg e "$(tr '\n' ' ' < "$WORKDIR/del.err")" \
           'select(.name==$n) | . + {deletedAt: $ts, deleteResult: "failed", error: $e}' \
           "$WORKDIR/decisions.jsonl" >> "$REPORT_JSONL.audit"; then
@@ -638,16 +636,16 @@ purge() {
   done < <(jq -r 'select(.decision=="DELETE") | .name' "$WORKDIR/decisions.jsonl")
 
   log "Suppressions : $DELETED reussies, $FAILED en echec."
-  if [[ -f "$REPORT_JSONL.audit" ]]; then log "Piste d'audit : $REPORT_JSONL.audit"; fi
+  if [[ -f "$REPORT_JSONL.audit" ]]; then log "Audit trail: $REPORT_JSONL.audit"; fi
 
   if [[ "$WAIT_RETIRE" -gt 0 && "$DELETED" -gt 0 ]]; then
     wait_for_retire
   fi
 
   if [[ "$audit_errors" -gt 0 ]]; then
-    err "$audit_errors ligne(s) de piste d'audit non ecrite(s) dans $REPORT_JSONL.audit"
-    err "Des suppressions ont eu lieu sans trace fichier complete. Les lignes AUDIT"
-    err "de la sortie d'erreur restent la trace de reference."
+    err "$audit_errors audit-trail line(s) could not be written to $REPORT_JSONL.audit"
+    err "Deletions happened without a complete file record. The AUDIT lines on"
+    err "standard error remain the reference trail."
     return 1
   fi
   if [[ "$FAILED" -gt 0 ]]; then return 1; fi
@@ -655,25 +653,25 @@ purge() {
 }
 
 wait_for_retire() {
-  log "Attente de la completion des RetireActions (max ${WAIT_RETIRE}s)..."
+  log "Waiting for the RetireActions to complete (max ${WAIT_RETIRE}s)..."
   local deadline=$(( $(date -u +%s) + WAIT_RETIRE )) pending
   while [[ $(date -u +%s) -lt $deadline ]]; do
     pending="$("$CLI" get "$RETIRE_CRD" -o json 2>/dev/null \
       | jq '[.items[] | select(.status.state != "Complete" and .status.state != "Failed" and .status.state != "Skipped")] | length' 2>/dev/null || echo 0)"
     if [[ "${pending:-0}" -eq 0 ]]; then
-      log "Tous les RetireActions sont termines."
+      log "All RetireActions have completed."
       return 0
     fi
     log "RetireActions en cours : $pending"
     sleep 15
   done
-  warn "Delai d'attente atteint, des RetireActions sont encore en cours (normal pour de gros exports)."
+  warn "Timeout reached, some RetireActions are still running (normal for large exports)."
 }
 
 # ---------------------------------- Main --------------------------------------
 main() {
   log "$SCRIPT_NAME v$SCRIPT_VERSION - run_id=$RUN_ID"
-  log "Outil communautaire non supporte par Veeam - fourni sans garantie"
+  log "Community tool, not supported by Veeam - provided without warranty"
   check_prereqs
   fetch_data
   evaluate
@@ -681,9 +679,9 @@ main() {
   summarize
   local rc=0
   purge || rc=$?
-  # Les metriques relevent de l'observabilite : leur echec ne doit pas ecraser
-  # le code retour de la purge, seule information qui engage des donnees.
-  # write_metrics avertit deja par elle-meme.
+  # Metrics are observability: their failure must not overwrite the purge exit
+  # code, the only piece of information that involves data.
+  # write_metrics warns on its own already.
   write_metrics || true
   exit $rc
 }
