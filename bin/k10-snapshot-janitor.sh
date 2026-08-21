@@ -2,6 +2,16 @@
 # =============================================================================
 # k10-snapshot-janitor.sh
 #
+# OUTIL COMMUNAUTAIRE - NON SUPPORTE PAR VEEAM
+#   Projet independant, sans affiliation avec Veeam Software, ni approbation
+#   ni parrainage de sa part. Veeam, Kasten et K10 sont des marques de Veeam
+#   Software Group GmbH, citees ici au seul titre de l'identification des
+#   produits avec lesquels cet outil interagit.
+#   Fourni sans aucune garantie. Aucun canal de support editeur ne le couvre :
+#   n'ouvrez pas de ticket de support Veeam a son sujet.
+#   Cet outil SUPPRIME DES SAUVEGARDES de maniere definitive. Validez-le en
+#   lab sur vos propres versions avant toute execution avec --apply.
+#
 # Purge des RestorePointContents de type SNAPSHOT LOCAL restes au-dela d'un
 # seuil d'age (7 jours par defaut) sur Veeam Kasten (K10).
 #
@@ -137,6 +147,12 @@ EXEMPTION PAR OBJET
   Ajouter le label $LBL_EXEMPT=true sur un RestorePointContent
   pour l'exclure definitivement de la purge :
     <cli> label $RPC_CRD <nom> $LBL_EXEMPT=true
+
+AVERTISSEMENT
+  Outil communautaire, non supporte par Veeam. Projet independant, sans
+  affiliation avec Veeam Software. Fourni sans aucune garantie.
+  Cet outil supprime des sauvegardes de maniere definitive : validez-le en
+  lab sur votre version avant toute execution avec --apply.
 EOF
 }
 
@@ -542,6 +558,7 @@ wait_for_retire() {
 # ---------------------------------- Main --------------------------------------
 main() {
   log "$SCRIPT_NAME v$SCRIPT_VERSION - run_id=$RUN_ID"
+  log "Outil communautaire non supporte par Veeam - fourni sans garantie"
   check_prereqs
   fetch_data
   evaluate

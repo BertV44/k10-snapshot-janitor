@@ -1,4 +1,9 @@
 # =============================================================================
+# OUTIL COMMUNAUTAIRE - NON SUPPORTE PAR VEEAM
+#   Image d'un projet independant, sans affiliation avec Veeam Software.
+#   Fournie sans aucune garantie. L'outil qu'elle embarque supprime des
+#   sauvegardes de maniere definitive.
+# =============================================================================
 # Image d'execution pour k10-snapshot-janitor.sh
 # Base UBI9-minimal + bash + jq + client oc (inclut kubectl)
 #
@@ -14,6 +19,14 @@
 # Dans ce cas, ajouter --cli kubectl aux arguments du CronJob.
 # =============================================================================
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+# Provenance : ces labels suivent l'image dans tout registry ou elle sera
+# poussee, la ou le README et le NOTICE ne suivent pas.
+LABEL org.opencontainers.image.title="k10-snapshot-janitor" \
+      org.opencontainers.image.description="Community housekeeping tool for stale Veeam Kasten snapshots. Deletes backup data. Not a Veeam product, not supported by Veeam." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="Independent community project, not affiliated with Veeam Software" \
+      org.opencontainers.image.source="https://github.com/BertV44/k10-snapshot-janitor"
 
 ARG OC_VERSION=stable-4.16
 ARG TARGETARCH=amd64

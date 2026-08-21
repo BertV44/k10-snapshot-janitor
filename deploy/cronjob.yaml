@@ -1,4 +1,10 @@
 # =============================================================================
+# OUTIL COMMUNAUTAIRE - NON SUPPORTE PAR VEEAM
+#   Projet independant, sans affiliation avec Veeam Software. Fourni sans
+#   aucune garantie, aucun canal de support editeur ne le couvre.
+#   Ce CronJob SUPPRIME DES SAUVEGARDES. Il est livre en dry-run : ne passez
+#   PURGE_APPLY a "true" qu'apres validation en lab sur vos propres versions.
+# =============================================================================
 # Purge quotidienne des snapshots K10 au-dela d'un seuil d'age
 # Deploiement in-cluster (OpenShift 4.x / Kubernetes 1.27+)
 #
