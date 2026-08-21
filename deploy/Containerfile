@@ -1,27 +1,31 @@
 # =============================================================================
-# OUTIL COMMUNAUTAIRE - NON SUPPORTE PAR VEEAM
-#   Image d'un projet independant, sans affiliation avec Veeam Software.
-#   Fournie sans aucune garantie. L'outil qu'elle embarque supprime des
-#   sauvegardes de maniere definitive.
+# COMMUNITY TOOL - NOT SUPPORTED BY VEEAM
+#   Image of an independent project, with no affiliation with Veeam Software.
+#   Provided without any warranty. The tool it carries deletes backups
+#   permanently.
 # =============================================================================
-# Image d'execution pour k10-snapshot-janitor.sh
-# Base UBI9-minimal + bash + jq + client oc (inclut kubectl)
+# Runtime image for k10-snapshot-janitor.sh
+# UBI9-minimal base + bash + jq + the oc client (which includes kubectl)
 #
-# Build (podman) :
-#   podman build -t k10-snapshot-janitor:1.0.0 -f Containerfile .
+# Build (podman):
+#   podman build -t k10-snapshot-janitor:1.0.0 -f deploy/Containerfile .
+#   The context must be the repository root: the COPY below takes
+#   bin/k10-snapshot-janitor.sh.
 #
-# Build in-cluster OpenShift :
+# In-cluster OpenShift build:
 #   oc -n kasten-io new-build --binary --name=k10-snapshot-janitor --strategy=docker
 #   oc -n kasten-io start-build k10-snapshot-janitor --from-dir=. --follow
 #   -> image-registry.openshift-image-registry.svc:5000/kasten-io/k10-snapshot-janitor:latest
 #
-# Alternative sans build : docker.io/alpine/k8s:1.30.2 embarque kubectl + jq.
-# Dans ce cas, ajouter --cli kubectl aux arguments du CronJob.
+# Without building: any community image carrying kubectl + jq works too. This
+# project's documentation uses "oc" throughout; if the chosen image only ships
+# kubectl, the script detects it on its own, and "--cli kubectl" is only there
+# to force the choice.
 # =============================================================================
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
-# Provenance : ces labels suivent l'image dans tout registry ou elle sera
-# poussee, la ou le README et le NOTICE ne suivent pas.
+# Provenance: these labels follow the image into any registry it is pushed to,
+# where the README and the NOTICE do not.
 LABEL org.opencontainers.image.title="k10-snapshot-janitor" \
       org.opencontainers.image.description="Community housekeeping tool for stale Veeam Kasten snapshots. Deletes backup data. Not a Veeam product, not supported by Veeam." \
       org.opencontainers.image.licenses="Apache-2.0" \
@@ -33,15 +37,17 @@ ARG TARGETARCH=amd64
 
 LABEL name="k10-snapshot-janitor" \
       version="1.0.0" \
-      summary="Purge des snapshots Veeam Kasten au-dela d'un seuil d'age" \
+      summary="Retires Veeam Kasten snapshots past an age threshold" \
       maintainer="TAM EMEA"
 
-RUN microdnf -y install bash jq tar gzip ca-certificates shadow-utils \
+# coreutils-single is explicit rather than assumed: the script calls date,
+# mktemp, rm, mkdir, wc, tr, cat, cp, mv, tee, sleep and basename.
+RUN microdnf -y install bash jq coreutils-single tar gzip ca-certificates shadow-utils \
     && microdnf -y clean all \
     && rm -rf /var/cache/yum
 
-# Client oc : recuperer depuis le miroir OpenShift.
-# En environnement air-gap, remplacer par un COPY depuis un artefact local :
+# oc client: fetched from the OpenShift mirror.
+# In an air-gapped environment, replace with a COPY from a local artifact:
 #   COPY oc /usr/local/bin/oc
 RUN set -eux; \
     case "${TARGETARCH}" in \
@@ -56,12 +62,12 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/oc /usr/local/bin/kubectl; \
     oc version --client
 
-# Le script est monte depuis une ConfigMap en production ; la copie ci-dessous
-# sert aux executions manuelles et aux tests de l'image.
+# In production the script is mounted from a ConfigMap; the copy below serves
+# manual runs and image testing.
 COPY bin/k10-snapshot-janitor.sh /opt/janitor/k10-snapshot-janitor.sh
 RUN chmod 0555 /opt/janitor/k10-snapshot-janitor.sh
 
-# UID arbitraire : OpenShift affecte un UID de la plage du namespace.
+# Arbitrary UID: OpenShift assigns one from the namespace range.
 USER 1001
 WORKDIR /tmp
 ENV HOME=/tmp

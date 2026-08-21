@@ -1,24 +1,24 @@
 # =============================================================================
-# OUTIL COMMUNAUTAIRE - NON SUPPORTE PAR VEEAM
-#   Projet independant, sans affiliation avec Veeam Software. Fourni sans
-#   aucune garantie, aucun canal de support editeur ne le couvre.
-#   Ce CronJob SUPPRIME DES SAUVEGARDES. Il est livre en dry-run : ne passez
-#   PURGE_APPLY a "true" qu'apres validation en lab sur vos propres versions.
+# COMMUNITY TOOL - NOT SUPPORTED BY VEEAM
+#   Independent project, with no affiliation with Veeam Software. Provided
+#   without any warranty; no vendor support channel covers it.
+#   This CronJob DELETES BACKUPS. It ships in dry-run: only set PURGE_APPLY to
+#   "true" after validating in a lab against your own versions.
 # =============================================================================
-# Purge quotidienne des snapshots K10 au-dela d'un seuil d'age
-# Deploiement in-cluster (OpenShift 4.x / Kubernetes 1.27+)
+# Daily housekeeping of K10 snapshots past an age threshold
+# In-cluster deployment (OpenShift 4.x / Kubernetes 1.27+)
 #
-# Cible : Veeam Kasten 8.5.x / 9.0.x, namespace d'installation "kasten-io"
+# Target: Veeam Kasten 8.5.x / 9.0.x, installed in the "kasten-io" namespace
 #
-# PREREQUIS : creer la ConfigMap portant le script AVANT d'appliquer ce fichier
+# PREREQUISITE: create the ConfigMap holding the script BEFORE applying this
 #   oc -n kasten-io create configmap k10-snapshot-janitor-script \
 #      --from-file=k10-snapshot-janitor.sh=./k10-snapshot-janitor.sh
 #
-# APPLICATION
+# APPLY
 #   oc apply -f deploy/cronjob.yaml
 #
-# Le CronJob est livre en DRY-RUN. Pour activer les suppressions, passer
-# PURGE_APPLY a "true" dans la ConfigMap k10-snapshot-janitor-config.
+# The CronJob ships in DRY-RUN. To enable deletions, set PURGE_APPLY to "true"
+# in the k10-snapshot-janitor-config ConfigMap.
 # =============================================================================
 ---
 apiVersion: v1
@@ -31,8 +31,8 @@ metadata:
     app.kubernetes.io/component: maintenance
     app.kubernetes.io/managed-by: tam-emea
 ---
-# Droits cluster-scoped : lecture/suppression des RestorePointContents,
-# lecture des RestorePoints et des RetireActions.
+# Cluster-scoped permissions: read and delete RestorePointContents, read
+# RestorePoints and RetireActions.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -70,8 +70,8 @@ subjects:
     name: k10-snapshot-janitor
     namespace: kasten-io
 ---
-# Droits namespaces : lecture des policies (detection des policies supprimees)
-# et des deployments (report de la version K10 dans le log).
+# Namespaced permissions: read the policies (to detect deleted ones) and the
+# deployments (to report the K10 version in the log).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -99,35 +99,40 @@ subjects:
     name: k10-snapshot-janitor
     namespace: kasten-io
 ---
-# Parametres d'execution. Modifier ici, pas dans le CronJob.
+# Runtime settings. Change them here, not in the CronJob.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: k10-snapshot-janitor-config
   namespace: kasten-io
 data:
-  # Seuil d'age en jours au-dela duquel un snapshot devient candidat
+  # Age threshold in days beyond which a snapshot becomes a candidate
   RETENTION_DAYS: "7"
-  # "true" = suppression reelle. Toute autre valeur = dry-run.
+  # "true" = real deletion. Any other value = dry-run.
   PURGE_APPLY: "false"
-  # Nombre de snapshots les plus recents toujours conserves par application
+  # Number of most recent snapshots always kept, per application
   MIN_KEEP: "1"
-  # Plafond de securite : abandon si le nombre de candidats est superieur
+  # Safety cap: abort if the number of candidates exceeds this
   MAX_DELETIONS: "50"
-  # Restreindre aux orphelins stricts : "true" active
-  #   --require-unbound (application supprimee) et
-  #   --orphan-policy-only (policy absente ou supprimee)
+  # Restrict to strict orphans: "true" enables
+  #   --require-unbound (application deleted) and
+  #   --orphan-policy-only (policy missing or deleted)
   CONSERVATIVE_MODE: "false"
-  # Namespaces applicatifs a ne jamais purger, separes par des espaces
+  # Application namespaces never to purge, space separated
   EXCLUDE_NAMESPACES: ""
-  # Policies a exclure, separees par des espaces
+  # Policies to exclude, space separated
   EXCLUDE_POLICIES: ""
-  # Attente de completion des RetireActions, en secondes (0 = pas d'attente)
+  # Applications to exclude, space separated
+  EXCLUDE_APPS: ""
+  # Restrict the scope to these namespaces only, space separated.
+  # Empty = the whole cluster.
+  INCLUDE_NAMESPACES: ""
+  # Seconds to wait for the RetireActions to complete (0 = no wait)
   WAIT_RETIRE: "0"
   K10_NAMESPACE: "kasten-io"
 ---
-# Persistance des rapports d'audit. Supprimer ce PVC et le volume associe
-# dans le CronJob pour se contenter des logs du pod.
+# Persistence for the audit reports. Drop this PVC and the matching volume in
+# the CronJob to rely on the pod logs only.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -138,7 +143,7 @@ spec:
   resources:
     requests:
       storage: 1Gi
-  # storageClassName: <a-renseigner-si-pas-de-classe-par-defaut>
+  # storageClassName: <set this if there is no default class>
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -149,7 +154,7 @@ metadata:
     app.kubernetes.io/name: k10-snapshot-janitor
     app.kubernetes.io/component: maintenance
 spec:
-  # Tous les jours a 03:00. Le fuseau du cluster s'applique sauf timeZone.
+  # Every day at 03:00. The cluster timezone applies unless timeZone is set.
   schedule: "0 3 * * *"
   timeZone: "Europe/Paris"
   concurrencyPolicy: Forbid
@@ -175,7 +180,7 @@ spec:
           containers:
             - name: purge
               # Image contenant oc (ou kubectl) et jq >= 1.6.
-              # Construire avec le Containerfile fourni, puis pousser dans le
+              # Build with the provided Containerfile, then push it to the
               # registre interne :
               #   image-registry.openshift-image-registry.svc:5000/kasten-io/k10-snapshot-janitor:1.0.0
               # Alternative publique rapide : docker.io/alpine/k8s:1.30.2
@@ -216,10 +221,19 @@ spec:
                     ARGS+=( --require-unbound --orphan-policy-only )
                   fi
 
-                  for ns in ${EXCLUDE_NAMESPACES}; do ARGS+=( --exclude-namespace "$ns" ); done
-                  for po in ${EXCLUDE_POLICIES};   do ARGS+=( --exclude-policy   "$po" ); done
+                  # set -f: word splitting is intended, globbing is not.
+                  # Without it, EXCLUDE_NAMESPACES="prod-*" would be expanded
+                  # against the container working directory.
+                  # The ':-' keep a ConfigMap predating these keys from failing
+                  # the Job under 'set -u'.
+                  set -f
+                  for ns  in ${EXCLUDE_NAMESPACES:-};  do ARGS+=( --exclude-namespace "$ns" );  done
+                  for po  in ${EXCLUDE_POLICIES:-};    do ARGS+=( --exclude-policy    "$po" );  done
+                  for ap  in ${EXCLUDE_APPS:-};        do ARGS+=( --exclude-app       "$ap" );  done
+                  for ins in ${INCLUDE_NAMESPACES:-};  do ARGS+=( --include-namespace "$ins" ); done
+                  set +f
 
-                  echo "Commande : k10-snapshot-janitor.sh ${ARGS[*]}"
+                  echo "Command: k10-snapshot-janitor.sh ${ARGS[*]}"
                   exec /opt/janitor/k10-snapshot-janitor.sh "${ARGS[@]}"
               volumeMounts:
                 - name: script

@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 
@@ -26,8 +26,8 @@ jobs:
             bash -n "$f"
           done
 
-      # Niveau warning volontairement strict. Si le premier run remonte des
-      # remarques cosmetiques, corriger le script plutot que d'abaisser le seuil.
+      # The warning level is deliberately strict. If the first run reports
+      # cosmetic findings, fix the script rather than lowering the threshold.
       - name: shellcheck
         run: shellcheck --shell=bash --severity=warning bin/*.sh test/*.sh
 
@@ -65,8 +65,8 @@ jobs:
           KUBECONFORM_VERSION=v0.6.7
           curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
             | tar -xz kubeconform
-          # Les CRD Kasten ne sont pas dans le catalogue de schemas public :
-          # les types inconnus sont ignores, les types Kubernetes natifs sont valides.
+          # The Kasten CRDs are not in the public schema catalogue: unknown
+          # kinds are ignored, native Kubernetes kinds are validated.
           ./kubeconform -strict -summary -ignore-missing-schemas \
             -kubernetes-version 1.29.0 \
             deploy/cronjob.yaml
