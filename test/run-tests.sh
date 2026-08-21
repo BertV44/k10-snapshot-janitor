@@ -44,7 +44,9 @@ rpc() { # name state ns app policy exportProfile ageDays exempt [badTimestamp]
                    "k10.kasten.io/runActionName":("run-"+$n)}
           + (if $pol=="" then {} else {"k10.kasten.io/policyName":$pol,
                                        "k10.kasten.io/policyNamespace":"kasten-io"} end)
-          + (if $exp=="" then {} else {"k10.kasten.io/exportProfile":$exp} end)
+          + (if $exp=="" then {}
+             elif $exp=="<empty>" then {"k10.kasten.io/exportProfile":""}
+             else {"k10.kasten.io/exportProfile":$exp} end)
           + (if $ex=="1" then {"k10-janitor/exempt":"true"} else {} end) ) },
       status:{ state:$st, actionTime:$ts, scheduledTime:$ts,
         logicalSizeBytes:17179869184, physicalSizeBytes:4852012,
@@ -75,6 +77,13 @@ build_fixtures() {
   } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc.json"
 
   jq -n '{apiVersion:"v1",kind:"List",items:[]}' > "$WORK/fixtures/rpc_empty.json"
+
+  # Kubernetes autorise un label a valeur vide. L'invariant 2 fait de l'ABSENCE
+  # du label exportProfile le discriminant, pas de sa valeur.
+  {
+    rpc rpc-ev-snapshot    Bound   prod       mysql      daily-prod  ""        1   0
+    rpc rpc-ev-export      Bound   prod       mysql      daily-prod  "<empty>" 60  0
+  } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_export_vide.json"
 
   # "gone-policy" est volontairement absente de cette liste
   jq -n '{apiVersion:"v1",kind:"List",items:[
@@ -252,6 +261,12 @@ reset_reports
 CLI_BIN=kubectl-nok10 run -d 7 --exclude-namespace protected && rc=0 || rc=$?
 assert_eq "0" "$rc" "la detection de l'image K10 est informative, pas bloquante"
 assert_eq "5" "$(candidates | wc -w | tr -d ' ')" "le rapport est produit malgre l'absence de deploiement K10"
+
+head_ "Cas 13 : label exportProfile present mais a valeur vide (invariant 2)"
+reset_reports
+RPC_FIXTURE=rpc_export_vide.json run -d 7 || true
+assert_eq "KEEP export-restorepoint" "$(decision_of rpc-ev-export)" "un export a label vide reste un export"
+assert_eq "" "$(candidates)" "aucun candidat a la suppression"
 
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs\033[0m\n' "$PASS" "$FAIL"

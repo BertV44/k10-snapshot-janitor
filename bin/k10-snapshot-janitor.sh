@@ -290,6 +290,7 @@ evaluate() {
             policyName:   ($l[$lblPolicy] // ""),
             policyNs:     ($l[$lblPolicyNs] // ""),
             runAction:    ($l[$lblRun] // ""),
+            hasExport:    ($l | has($lblExport)),
             exportProfile:($l[$lblExport] // ""),
             exempt:       (($l[$lblExempt] // "") | ascii_downcase == "true"),
             actionTime:    (.status.actionTime // null),
@@ -303,7 +304,10 @@ evaluate() {
         | .refEpoch = (.refTime | to_epoch)
         | .ageDays  = (if .refEpoch == null then null
                        else (($NOW - .refEpoch) / 86400 * 100 | floor) / 100 end)
-        | .kind     = (if .exportProfile == "" then "snapshot" else "export" end)
+        # Discriminant = PRESENCE du label, pas sa valeur : Kubernetes autorise
+        # un label a valeur vide, et en jq seuls null et false sont falsy,
+        # donc la chaine vide traversait le // et passait pour un snapshot.
+        | .kind     = (if .hasExport then "export" else "snapshot" end)
         | .appKey   = (if .appNamespace == "" then "<unknown>" else .appNamespace end)
                       + "/" + (if .appName == "" then "<unknown>" else .appName end)
         | .onDemand = (.policyName == "")
