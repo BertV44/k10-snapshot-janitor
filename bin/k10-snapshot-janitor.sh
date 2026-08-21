@@ -163,6 +163,9 @@ done
 
 [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]] || die "--retention-days doit etre un entier"
 [[ "$MIN_KEEP"       =~ ^[0-9]+$ ]] || die "--min-keep doit etre un entier"
+# Invariant : aucune application ne doit pouvoir se retrouver sans aucun point
+# de restauration. --min-keep 0 desactiverait la garde de rang.
+[[ "$MIN_KEEP" -ge 1 ]] || die "--min-keep doit etre >= 1 (une application ne peut pas rester sans point de restauration)"
 [[ "$MAX_DELETIONS"  =~ ^[0-9]+$ ]] || die "--max-deletions doit etre un entier"
 [[ "$WAIT_RETIRE"    =~ ^[0-9]+$ ]] || die "--wait-retire doit etre un entier"
 

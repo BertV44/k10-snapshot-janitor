@@ -268,6 +268,12 @@ RPC_FIXTURE=rpc_export_vide.json run -d 7 || true
 assert_eq "KEEP export-restorepoint" "$(decision_of rpc-ev-export)" "un export a label vide reste un export"
 assert_eq "" "$(candidates)" "aucun candidat a la suppression"
 
+head_ "Cas 14 : --min-keep 0 refuse (invariant 3)"
+reset_reports
+run -d 7 --min-keep 0 && rc=0 || rc=$?
+assert_eq "1" "$rc" "--min-keep 0 sort en code 1"
+assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "aucune suppression"
+
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs\033[0m\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]] || exit 1
