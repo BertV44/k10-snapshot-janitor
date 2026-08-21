@@ -7,7 +7,11 @@
 # KEEP/DELETE, les garde-fous et les codes retour.
 #
 # Usage : ./test/run-tests.sh
-# Dependances : bash >= 4, jq >= 1.6, python3 (validation YAML, optionnel)
+# Dependances : bash >= 4, jq >= 1.6, python3 + pyyaml
+#
+# python3 + pyyaml sont requis : sans eux la validation des manifests est
+# ignoree, et une suite amputee qui sort en 0 laisserait croire que tout a
+# ete verifie. Un cas ignore fait donc echouer la suite.
 # =============================================================================
 set -Eeuo pipefail
 
@@ -18,9 +22,11 @@ trap 'rm -rf "$WORK"' EXIT
 
 PASS=0
 FAIL=0
+SKIP=0
 
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
 ko()   { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
+skip() { printf '  \033[33mSKIP\033[0m %s\n' "$1"; SKIP=$((SKIP+1)); }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 assert_eq() { # attendu obtenu libelle
@@ -84,6 +90,34 @@ build_fixtures() {
     rpc rpc-ev-snapshot    Bound   prod       mysql      daily-prod  ""        1   0
     rpc rpc-ev-export      Bound   prod       mysql      daily-prod  "<empty>" 60  0
   } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_export_vide.json"
+
+  # Deux exports anciens, dont un exempte : sert a verifier que l'exemption
+  # reste prioritaire quand --include-exports elargit le perimetre.
+  {
+    rpc rpc-ie-snapshot    Bound   prod       mysql      daily-prod  ""      1   0
+    rpc rpc-ie-export      Bound   prod       mysql      daily-prod  s3-prod 300 0
+    rpc rpc-ie-export-ex   Bound   prod       mysql      daily-prod  s3-prod 310 1
+  } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_include_exports.json"
+
+  # Frontiere d'age : le moteur compare avec <=, un objet pile au seuil doit
+  # etre conserve. Chaque application a un objet recent pour que celui teste
+  # ne soit pas rang 0 et ne parte pas en min-keep-guard.
+  {
+    rpc rpc-bord-recent-a  Bound   prod       borda      daily-prod  ""      0   0
+    rpc rpc-bord-pile      Bound   prod       borda      daily-prod  ""      7   0
+    rpc rpc-bord-recent-b  Bound   prod       bordb      daily-prod  ""      0   0
+    rpc rpc-bord-au-dela   Bound   prod       bordb      daily-prod  ""      8   0
+  } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_bordure.json"
+
+  # Aucune des trois sources d'horodatage : actionTime, scheduledTime et
+  # creationTimestamp tous absents ou nuls.
+  jq -n '{apiVersion:"v1",kind:"List",items:[
+    { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
+      metadata:{ name:"rpc-sans-horodatage", creationTimestamp:null,
+        labels:{ "k10.kasten.io/appName":"mysql",
+                 "k10.kasten.io/appNamespace":"prod" } },
+      status:{ state:"Bound", restorePointRef:null } }]}' \
+    > "$WORK/fixtures/rpc_sans_ts.json"
 
   # Horodatage de type non-string : doit donner KEEP, pas un plantage jq dont
   # le code retour sortirait des codes documentes (invariants 4 et 8).
@@ -281,7 +315,7 @@ print(cj['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['ar
   done; done
   assert_eq "1" "$allok" "construction des arguments du CronJob sur les 4 combinaisons"
 else
-  printf '  \033[33mSKIP\033[0m python3/pyyaml absent, validation des manifests ignoree\n'
+  skip "python3/pyyaml absent, validation des manifests ignoree"
 fi
 
 head_ "Cas 12 : deploiement K10 introuvable"
@@ -347,6 +381,51 @@ reset_reports
 run -d 7 --exclude-namespace protected --max-deletions 3 --apply && rc=0 || rc=$?
 assert_eq "2" "$rc" "le plafond protege toujours en --apply"
 
+head_ "Cas 20 : --include-exports, seule option qui elargit le perimetre (issue #7)"
+reset_reports
+run -d 7 --exclude-namespace protected --include-exports || true
+assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-export-old2)" "export de 300 jours devient candidat"
+assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-export-old)"  "export de 30 jours devient candidat"
+assert_eq "rpc-ex-3 rpc-export-old rpc-export-old2 rpc-mysql-old rpc-mysql-older rpc-redis-b rpc-wp-2" \
+  "$(candidates)" "liste exacte : les 5 candidats de base plus les 2 exports"
+# l'exemption reste prioritaire, meme quand les exports entrent dans le perimetre
+reset_reports
+RPC_FIXTURE=rpc_include_exports.json run -d 7 --include-exports || true
+assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-ie-export)"    "export ancien supprime sous --include-exports"
+assert_eq "KEEP labelled-exempt"           "$(decision_of rpc-ie-export-ex)" "le label d'exemption prime sur --include-exports"
+assert_eq "rpc-ie-export" "$(candidates)" "seul l'export non exempte est candidat"
+
+head_ "Cas 21 : frontiere d'age, le seuil est inclusif (issue #7)"
+reset_reports
+RPC_FIXTURE=rpc_bordure.json run -d 7 || true
+assert_eq "KEEP within-retention"          "$(decision_of rpc-bord-pile)"    "un objet pile au seuil est conserve"
+assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-bord-au-dela)" "un objet au-dela du seuil est candidat"
+
+head_ "Cas 22 : --exclude-policy et --exclude-app (issue #7)"
+reset_reports
+run -d 7 --exclude-namespace protected --exclude-policy daily-prod || true
+assert_eq "KEEP policy-excluded" "$(decision_of rpc-mysql-old)" "policy exclue respectee"
+reset_reports
+run -d 7 --exclude-app payments || true
+assert_eq "KEEP app-excluded" "$(decision_of rpc-excl-2)" "application exclue respectee"
+
+head_ "Cas 23 : --metrics-file (issue #7)"
+reset_reports
+rm -f "$WORK/metrics.prom"
+run -d 7 --exclude-namespace protected --metrics-file "$WORK/metrics.prom" || true
+assert_eq "9" "$(grep -c '^k10_janitor_' "$WORK/metrics.prom" 2>/dev/null || echo 0)" "9 metriques ecrites"
+assert_eq "5" "$(awk '/^k10_janitor_candidates_total /{print $2}' "$WORK/metrics.prom" 2>/dev/null)" "candidates_total coherent avec le rapport"
+assert_eq "1" "$(awk '/^k10_janitor_dry_run /{print $2}' "$WORK/metrics.prom" 2>/dev/null)" "dry_run signale"
+
+head_ "Cas 24 : aucune des trois sources d'horodatage (invariant 4)"
+reset_reports
+RPC_FIXTURE=rpc_sans_ts.json run -d 7 && rc=0 || rc=$?
+assert_eq "0" "$rc" "code retour 0"
+assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-sans-horodatage)" "objet sans horodatage conserve"
+
 # --------------------------------- Bilan -------------------------------------
-printf '\n\033[1mBilan : %d reussis, %d echecs\033[0m\n' "$PASS" "$FAIL"
-[[ $FAIL -eq 0 ]] || exit 1
+printf '\n\033[1mBilan : %d reussis, %d echecs, %d ignores\033[0m\n' "$PASS" "$FAIL" "$SKIP"
+if [[ $SKIP -gt 0 ]]; then
+  printf '\033[31mSuite incomplete : %d cas ignore(s). Installer python3 et pyyaml.\033[0m\n' "$SKIP"
+fi
+[[ $FAIL -eq 0 && $SKIP -eq 0 ]] || exit 1
