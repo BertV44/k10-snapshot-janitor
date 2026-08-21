@@ -1,0 +1,235 @@
+# =============================================================================
+# Purge quotidienne des snapshots K10 au-dela d'un seuil d'age
+# Deploiement in-cluster (OpenShift 4.x / Kubernetes 1.27+)
+#
+# Cible : Veeam Kasten 8.5.x / 9.0.x, namespace d'installation "kasten-io"
+#
+# PREREQUIS : creer la ConfigMap portant le script AVANT d'appliquer ce fichier
+#   oc -n kasten-io create configmap k10-snapshot-janitor-script \
+#      --from-file=k10-snapshot-janitor.sh=./k10-snapshot-janitor.sh
+#
+# APPLICATION
+#   oc apply -f deploy/cronjob.yaml
+#
+# Le CronJob est livre en DRY-RUN. Pour activer les suppressions, passer
+# PURGE_APPLY a "true" dans la ConfigMap k10-snapshot-janitor-config.
+# =============================================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k10-snapshot-janitor
+  namespace: kasten-io
+  labels:
+    app.kubernetes.io/name: k10-snapshot-janitor
+    app.kubernetes.io/component: maintenance
+    app.kubernetes.io/managed-by: tam-emea
+---
+# Droits cluster-scoped : lecture/suppression des RestorePointContents,
+# lecture des RestorePoints et des RetireActions.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k10-snapshot-janitor
+  labels:
+    app.kubernetes.io/name: k10-snapshot-janitor
+rules:
+  - apiGroups: ["apps.kio.kasten.io"]
+    resources: ["restorepointcontents"]
+    verbs: ["get", "list", "delete"]
+  - apiGroups: ["apps.kio.kasten.io"]
+    resources: ["restorepoints"]
+    verbs: ["get", "list"]
+  - apiGroups: ["actions.kio.kasten.io"]
+    resources: ["retireactions"]
+    verbs: ["get", "list"]
+  # Verification de presence du CRD au demarrage (facultatif : retirer si refuse)
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get"]
+    resourceNames: ["restorepointcontents.apps.kio.kasten.io"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k10-snapshot-janitor
+  labels:
+    app.kubernetes.io/name: k10-snapshot-janitor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k10-snapshot-janitor
+subjects:
+  - kind: ServiceAccount
+    name: k10-snapshot-janitor
+    namespace: kasten-io
+---
+# Droits namespaces : lecture des policies (detection des policies supprimees)
+# et des deployments (report de la version K10 dans le log).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: k10-snapshot-janitor
+  namespace: kasten-io
+rules:
+  - apiGroups: ["config.kio.kasten.io"]
+    resources: ["policies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: k10-snapshot-janitor
+  namespace: kasten-io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: k10-snapshot-janitor
+subjects:
+  - kind: ServiceAccount
+    name: k10-snapshot-janitor
+    namespace: kasten-io
+---
+# Parametres d'execution. Modifier ici, pas dans le CronJob.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k10-snapshot-janitor-config
+  namespace: kasten-io
+data:
+  # Seuil d'age en jours au-dela duquel un snapshot devient candidat
+  RETENTION_DAYS: "7"
+  # "true" = suppression reelle. Toute autre valeur = dry-run.
+  PURGE_APPLY: "false"
+  # Nombre de snapshots les plus recents toujours conserves par application
+  MIN_KEEP: "1"
+  # Plafond de securite : abandon si le nombre de candidats est superieur
+  MAX_DELETIONS: "50"
+  # Restreindre aux orphelins stricts : "true" active
+  #   --require-unbound (application supprimee) et
+  #   --orphan-policy-only (policy absente ou supprimee)
+  CONSERVATIVE_MODE: "false"
+  # Namespaces applicatifs a ne jamais purger, separes par des espaces
+  EXCLUDE_NAMESPACES: ""
+  # Policies a exclure, separees par des espaces
+  EXCLUDE_POLICIES: ""
+  # Attente de completion des RetireActions, en secondes (0 = pas d'attente)
+  WAIT_RETIRE: "0"
+  K10_NAMESPACE: "kasten-io"
+---
+# Persistance des rapports d'audit. Supprimer ce PVC et le volume associe
+# dans le CronJob pour se contenter des logs du pod.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k10-snapshot-janitor-reports
+  namespace: kasten-io
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+  # storageClassName: <a-renseigner-si-pas-de-classe-par-defaut>
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: k10-snapshot-janitor
+  namespace: kasten-io
+  labels:
+    app.kubernetes.io/name: k10-snapshot-janitor
+    app.kubernetes.io/component: maintenance
+spec:
+  # Tous les jours a 03:00. Le fuseau du cluster s'applique sauf timeZone.
+  schedule: "0 3 * * *"
+  timeZone: "Europe/Paris"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: k10-snapshot-janitor
+        spec:
+          serviceAccountName: k10-snapshot-janitor
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: purge
+              # Image contenant oc (ou kubectl) et jq >= 1.6.
+              # Construire avec le Containerfile fourni, puis pousser dans le
+              # registre interne :
+              #   image-registry.openshift-image-registry.svc:5000/kasten-io/k10-snapshot-janitor:1.0.0
+              # Alternative publique rapide : docker.io/alpine/k8s:1.30.2
+              image: REGISTRY/k10-snapshot-janitor:1.0.0
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              envFrom:
+                - configMapRef:
+                    name: k10-snapshot-janitor-config
+              command: ["/bin/bash", "-c"]
+              args:
+                - |
+                  set -Eeuo pipefail
+                  ARGS=( --retention-days "${RETENTION_DAYS}"
+                         --k10-namespace "${K10_NAMESPACE}"
+                         --min-keep "${MIN_KEEP}"
+                         --max-deletions "${MAX_DELETIONS}"
+                         --wait-retire "${WAIT_RETIRE}"
+                         --report-dir /reports
+                         --metrics-file /reports/k10-janitor.prom )
+
+                  if [[ "${PURGE_APPLY}" == "true" ]]; then
+                    ARGS+=( --apply )
+                  fi
+
+                  if [[ "${CONSERVATIVE_MODE}" == "true" ]]; then
+                    ARGS+=( --require-unbound --orphan-policy-only )
+                  fi
+
+                  for ns in ${EXCLUDE_NAMESPACES}; do ARGS+=( --exclude-namespace "$ns" ); done
+                  for po in ${EXCLUDE_POLICIES};   do ARGS+=( --exclude-policy   "$po" ); done
+
+                  echo "Commande : k10-snapshot-janitor.sh ${ARGS[*]}"
+                  exec /opt/janitor/k10-snapshot-janitor.sh "${ARGS[@]}"
+              volumeMounts:
+                - name: script
+                  mountPath: /opt/janitor
+                  readOnly: true
+                - name: reports
+                  mountPath: /reports
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: script
+              configMap:
+                name: k10-snapshot-janitor-script
+                defaultMode: 0555
+            - name: reports
+              persistentVolumeClaim:
+                claimName: k10-snapshot-janitor-reports
+            - name: tmp
+              emptyDir: {}
