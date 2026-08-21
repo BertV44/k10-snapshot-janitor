@@ -423,6 +423,14 @@ RPC_FIXTURE=rpc_sans_ts.json run -d 7 && rc=0 || rc=$?
 assert_eq "0" "$rc" "code retour 0"
 assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-sans-horodatage)" "objet sans horodatage conserve"
 
+head_ "Cas 25 : le label d'exemption n'est pas pilotable par l'environnement (issue #9)"
+reset_reports
+LBL_EXEMPT=autre/cle run -d 7 --exclude-namespace protected || true
+assert_eq "KEEP labelled-exempt" "$(decision_of rpc-ex-2)" "une variable d'environnement ne desactive pas les exemptions"
+reset_reports
+run -d 7 --exclude-namespace protected --exempt-label autre/cle || true
+assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-ex-2)" "--exempt-label reste la seule surcharge"
+
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs, %d ignores\033[0m\n' "$PASS" "$FAIL" "$SKIP"
 if [[ $SKIP -gt 0 ]]; then

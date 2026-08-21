@@ -60,9 +60,12 @@ readonly LBL_APPTYPE="k10.kasten.io/appType"
 readonly LBL_POLICY="k10.kasten.io/policyName"
 readonly LBL_POLICY_NS="k10.kasten.io/policyNamespace"
 readonly LBL_RUN="k10.kasten.io/runActionName"
-# Cle du label d'exemption. Surchargeable via --exempt-label pour s'aligner
-# sur la convention de nommage du client.
-LBL_EXEMPT="${LBL_EXEMPT:-k10-janitor/exempt}"
+# Cle du label d'exemption. Surchargeable via --exempt-label uniquement, et
+# volontairement PAS depuis l'environnement : le CronJob monte sa ConfigMap
+# avec envFrom, donc toute cle qui y serait ajoutee deviendrait une variable
+# d'environnement. Un LBL_EXEMPT pose la desactiverait en silence toutes les
+# exemptions posees sur les objets.
+LBL_EXEMPT="k10-janitor/exempt"
 
 # ----------------------------- Valeurs par defaut ----------------------------
 RETENTION_DAYS=7
