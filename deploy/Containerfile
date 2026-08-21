@@ -1,0 +1,70 @@
+# =============================================================================
+# OUTIL COMMUNAUTAIRE - NON SUPPORTE PAR VEEAM
+#   Image d'un projet independant, sans affiliation avec Veeam Software.
+#   Fournie sans aucune garantie. L'outil qu'elle embarque supprime des
+#   sauvegardes de maniere definitive.
+# =============================================================================
+# Image d'execution pour k10-snapshot-janitor.sh
+# Base UBI9-minimal + bash + jq + client oc (inclut kubectl)
+#
+# Build (podman) :
+#   podman build -t k10-snapshot-janitor:1.0.0 -f Containerfile .
+#
+# Build in-cluster OpenShift :
+#   oc -n kasten-io new-build --binary --name=k10-snapshot-janitor --strategy=docker
+#   oc -n kasten-io start-build k10-snapshot-janitor --from-dir=. --follow
+#   -> image-registry.openshift-image-registry.svc:5000/kasten-io/k10-snapshot-janitor:latest
+#
+# Alternative sans build : docker.io/alpine/k8s:1.30.2 embarque kubectl + jq.
+# Dans ce cas, ajouter --cli kubectl aux arguments du CronJob.
+# =============================================================================
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+# Provenance : ces labels suivent l'image dans tout registry ou elle sera
+# poussee, la ou le README et le NOTICE ne suivent pas.
+LABEL org.opencontainers.image.title="k10-snapshot-janitor" \
+      org.opencontainers.image.description="Community housekeeping tool for stale Veeam Kasten snapshots. Deletes backup data. Not a Veeam product, not supported by Veeam." \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.vendor="Independent community project, not affiliated with Veeam Software" \
+      org.opencontainers.image.source="https://github.com/BertV44/k10-snapshot-janitor"
+
+ARG OC_VERSION=stable-4.16
+ARG TARGETARCH=amd64
+
+LABEL name="k10-snapshot-janitor" \
+      version="1.0.0" \
+      summary="Purge des snapshots Veeam Kasten au-dela d'un seuil d'age" \
+      maintainer="TAM EMEA"
+
+RUN microdnf -y install bash jq tar gzip ca-certificates shadow-utils \
+    && microdnf -y clean all \
+    && rm -rf /var/cache/yum
+
+# Client oc : recuperer depuis le miroir OpenShift.
+# En environnement air-gap, remplacer par un COPY depuis un artefact local :
+#   COPY oc /usr/local/bin/oc
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) ARCH_PATH="" ;; \
+      arm64) ARCH_PATH="arm64/" ;; \
+      *)     ARCH_PATH="" ;; \
+    esac; \
+    curl -sSfL "https://mirror.openshift.com/pub/openshift-v4/${ARCH_PATH}clients/ocp/${OC_VERSION}/openshift-client-linux.tar.gz" \
+      -o /tmp/oc.tgz; \
+    tar -xzf /tmp/oc.tgz -C /usr/local/bin oc kubectl; \
+    rm -f /tmp/oc.tgz; \
+    chmod 0755 /usr/local/bin/oc /usr/local/bin/kubectl; \
+    oc version --client
+
+# Le script est monte depuis une ConfigMap en production ; la copie ci-dessous
+# sert aux executions manuelles et aux tests de l'image.
+COPY bin/k10-snapshot-janitor.sh /opt/janitor/k10-snapshot-janitor.sh
+RUN chmod 0555 /opt/janitor/k10-snapshot-janitor.sh
+
+# UID arbitraire : OpenShift affecte un UID de la plage du namespace.
+USER 1001
+WORKDIR /tmp
+ENV HOME=/tmp
+
+ENTRYPOINT ["/opt/janitor/k10-snapshot-janitor.sh"]
+CMD ["--help"]

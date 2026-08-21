@@ -1,0 +1,30 @@
+# Rapports et sorties d'execution : ne jamais committer, peuvent contenir
+# des noms de namespaces, d'applications et de policies reels.
+reports/
+k10-janitor-reports/
+*.prom
+k10-janitor-*.csv
+k10-janitor-*.jsonl
+k10-janitor-*.jsonl.audit
+k10-janitor-*.summary.txt
+
+# Kubeconfig et secrets
+kubeconfig
+*.kubeconfig
+.kube/
+*.pem
+*.key
+*.token
+
+# Support bundles Kasten
+*-support-bundle*.tar.gz
+k10_debug*
+
+# Artefacts locaux
+.DS_Store
+*.swp
+*~
+/tmp/
+
+# Instructions projet pour Claude Code : local uniquement, jamais publie
+CLAUDE.md

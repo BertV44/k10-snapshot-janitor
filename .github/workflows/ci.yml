@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: shellcheck and syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: bash syntax check
+        run: |
+          for f in bin/*.sh test/*.sh; do
+            echo "-> $f"
+            bash -n "$f"
+          done
+
+      # Niveau warning volontairement strict. Si le premier run remonte des
+      # remarques cosmetiques, corriger le script plutot que d'abaisser le seuil.
+      - name: shellcheck
+        run: shellcheck --shell=bash --severity=warning bin/*.sh test/*.sh
+
+  test:
+    name: decision engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+          python3 -m pip install --quiet pyyaml
+          jq --version
+          bash --version | head -1
+
+      - name: Run offline test suite
+        run: ./test/run-tests.sh
+
+  manifests:
+    name: manifest validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: yamllint
+        run: |
+          python3 -m pip install --quiet yamllint
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 160}}}" \
+            deploy/cronjob.yaml .github/workflows/ci.yml
+
+      - name: kubeconform against upstream and Kasten CRD schemas
+        run: |
+          KUBECONFORM_VERSION=v0.6.7
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz kubeconform
+          # Les CRD Kasten ne sont pas dans le catalogue de schemas public :
+          # les types inconnus sont ignores, les types Kubernetes natifs sont valides.
+          ./kubeconform -strict -summary -ignore-missing-schemas \
+            -kubernetes-version 1.29.0 \
+            deploy/cronjob.yaml
+
+  secrets:
+    name: no leaked material
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Grep for obvious secrets and internal identifiers
+        run: |
+          set +e
+          PATTERN='BEGIN (RSA|EC|OPENSSH|PRIVATE) KEY|eyJ[A-Za-z0-9_-]{20,}\.|kind: Secret|\.veeam\.com|kubeconfig:'
+          MATCHES=$(grep -rInE "$PATTERN" \
+            --exclude-dir=.git --exclude=NOTICE --exclude=README.md \
+            --exclude=CLAUDE.md --exclude-dir=.github . )
+          if [ -n "$MATCHES" ]; then
+            echo "Motifs suspects detectes :"
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "Aucun motif suspect."
