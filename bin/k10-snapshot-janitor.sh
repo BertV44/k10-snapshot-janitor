@@ -68,6 +68,8 @@ readonly LBL_RUN="k10.kasten.io/runActionName"
 LBL_EXEMPT="k10-janitor/exempt"
 
 # ----------------------------- Valeurs par defaut ----------------------------
+# usage() est appelee depuis la boucle de parsing : sans copie figee, un
+# "--min-keep 5 -h" afficherait "defaut: 5". On garde donc les defauts a part.
 RETENTION_DAYS=7
 K10_NAMESPACE="${K10_NAMESPACE:-kasten-io}"
 CLI=""
@@ -103,6 +105,12 @@ die()  { err "$*"; exit 1; }
 # fonctions et les sous-shells.
 trap 'err "Erreur inattendue (ligne $LINENO)"; exit 1' ERR
 
+readonly DEF_RETENTION_DAYS="$RETENTION_DAYS"
+readonly DEF_MIN_KEEP="$MIN_KEEP"
+readonly DEF_MAX_DELETIONS="$MAX_DELETIONS"
+readonly DEF_K10_NAMESPACE="$K10_NAMESPACE"
+readonly DEF_REPORT_DIR="$REPORT_DIR"
+
 usage() {
   cat <<EOF
 $SCRIPT_NAME v$SCRIPT_VERSION - purge des snapshots K10 au-dela d'un seuil d'age
@@ -111,7 +119,7 @@ USAGE
   $SCRIPT_NAME [options]
 
 SELECTION
-  -d, --retention-days N     Age minimum en jours pour qu'un snapshot soit candidat (defaut: $RETENTION_DAYS)
+  -d, --retention-days N     Age minimum en jours pour qu'un snapshot soit candidat (defaut: $DEF_RETENTION_DAYS)
       --require-unbound      Ne cibler que les RestorePointContents en state Unbound
                              (application/namespace supprime cote cluster)
       --orphan-policy-only   Ne cibler que les RPC sans label $LBL_POLICY
@@ -124,21 +132,23 @@ SELECTION
 
 GARDE-FOUS
       --apply                Executer reellement les suppressions (sinon dry-run)
+      --dry-run              Forcer le dry-run. Utile pour neutraliser un
+                             --apply place plus tot dans la ligne de commande
       --min-keep N           Toujours conserver les N snapshots les plus recents
-                             par application, meme hors retention (defaut: $MIN_KEEP)
+                             par application, meme hors retention (defaut: $DEF_MIN_KEEP)
       --max-deletions N      Sous --apply, abandonner si le nombre de candidats
                              depasse N. En dry-run, le depassement est signale
                              mais le code retour reste 0.
-                             (defaut: $MAX_DELETIONS, 0 = illimite)
+                             (defaut: $DEF_MAX_DELETIONS, 0 = illimite)
       --wait-retire SEC      Attendre jusqu'a SEC la completion des RetireActions
       --exempt-label KEY     Cle du label d'exemption (defaut: $LBL_EXEMPT)
 
 ENVIRONNEMENT
-  -n, --k10-namespace NS     Namespace d'installation de K10 (defaut: $K10_NAMESPACE)
+  -n, --k10-namespace NS     Namespace d'installation de K10 (defaut: $DEF_K10_NAMESPACE)
       --cli oc|kubectl       Forcer le binaire (defaut: autodetection OpenShift)
 
 SORTIES
-  -r, --report-dir DIR       Repertoire des rapports (defaut: $REPORT_DIR)
+  -r, --report-dir DIR       Repertoire des rapports (defaut: $DEF_REPORT_DIR)
       --metrics-file PATH    Ecrire les metriques Prometheus (textfile collector)
   -q, --quiet                Silencieux (erreurs uniquement)
   -h, --help                 Cette aide
