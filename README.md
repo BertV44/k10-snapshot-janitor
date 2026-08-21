@@ -105,8 +105,6 @@ cluster is contacted.
 
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — operational guide, rollout procedure,
   known limitations (French)
-- [`CLAUDE.md`](CLAUDE.md) — project conventions and invariants for AI-assisted
-  development (French)
 
 ## License
 

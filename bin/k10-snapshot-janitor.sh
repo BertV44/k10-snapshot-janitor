@@ -228,14 +228,27 @@ check_prereqs() {
   detect_cli
   "$CLI" version --request-timeout=15s >/dev/null 2>&1 \
     || { err "Impossible de joindre l'API Kubernetes avec '$CLI'"; exit 3; }
-  "$CLI" get crd "$RPC_CRD" >/dev/null 2>&1 \
-    || warn "CRD $RPC_CRD non listable (RBAC sur les CRD ?) - poursuite"
+  # RestorePointContent est servi par une APIService agregee
+  # (v1alpha1.apps.kio.kasten.io -> kasten-io/aggregatedapis-svc), pas par un
+  # CRD : 'get crd' echoue donc sur une installation Kasten normale. Verifie
+  # sur K10 9.0.3. Le message reste informatif, la vraie verification est la
+  # lecture des objets dans fetch_data, qui echoue avec un message explicite.
+  if ! "$CLI" get crd "$RPC_CRD" >/dev/null 2>&1; then
+    log "$RPC_CRD hors CRD (API agregee Kasten attendue) - poursuite"
+  fi
+  # Le label porte la version lisible ; l'image est souvent referencee par
+  # digest et n'apprend rien. Verifie sur K10 9.0.3 : label = "9.0.3", image =
+  # registry.connect.redhat.com/kasten/aggregatedapis@sha256:...
   local v
   v="$("$CLI" -n "$K10_NAMESPACE" get deploy -l app=k10 \
-        -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+        -o jsonpath='{.items[0].metadata.labels.app\.kubernetes\.io/version}' 2>/dev/null || true)"
+  if [[ -z "$v" ]]; then
+    v="$("$CLI" -n "$K10_NAMESPACE" get deploy -l app=k10 \
+          -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+  fi
   # Un 'if' et non 'cmd && cmd' : en derniere instruction d'une fonction
   # appelee nue sous 'set -e', un test faux fait sortir tout le script.
-  if [[ -n "$v" ]]; then log "Image K10 detectee : $v"; fi
+  if [[ -n "$v" ]]; then log "Version K10 detectee : $v"; fi
 }
 
 # ------------------------------- Collecte K10 --------------------------------

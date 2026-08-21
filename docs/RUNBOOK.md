@@ -11,7 +11,6 @@ CLI : `oc` en priorité (autodétection OpenShift), repli `kubectl`.
 | `deploy/cronjob.yaml` | ServiceAccount, RBAC least-privilege, ConfigMap de paramètres, PVC de rapports, CronJob quotidien |
 | `deploy/Containerfile` | Image UBI9-minimal + `oc` + `jq` pour le CronJob |
 | `test/run-tests.sh` | Suite de tests du moteur de decision, hors cluster |
-| `CLAUDE.md` | Conventions et invariants du projet |
 
 ---
 
@@ -190,12 +189,62 @@ oc -n kasten-io create configmap k10-snapshot-janitor-script \
 
 ## 8. Limites connues
 
-- La réclamation d'espace n'est ni immédiate ni proportionnelle. [disponible] Déduplication, données partagées entre restore points, rétention de versions pour les backups immuables et fenêtres de sécurité peuvent retarder ou annuler le gain. Le champ `reclaimable_bytes` du rapport est une borne supérieure indicative fondée sur `status.physicalSizeBytes`.
+- La réclamation d'espace n'est ni immédiate ni proportionnelle. [disponible] Déduplication, données partagées entre restore points, rétention de versions pour les backups immuables et fenêtres de sécurité peuvent retarder ou annuler le gain. Le champ `reclaimable_bytes` du rapport est une borne supérieure indicative fondée sur `status.physicalSizeBytes`. **[non vérifié]** ce champ était absent sur l'intégralité de l'inventaire du cluster de validation, où le script rapporte donc 0 : voir la section 9.
 - Le script ne touche pas aux `ClusterRestorePoints` (ressources cluster-scoped issues des `BackupClusterAction`). À traiter séparément si le besoin apparaît.
 - Le script ne cherche pas les `VolumeSnapshots` CSI orphelins au niveau storage, c'est-à-dire non référencés par un `RestorePointContent`. C'est un cas de fuite distinct, à traiter avec une logique dédiée.
-- `k10.kasten.io/appType` peut être absent sur les restore points créés par d'anciennes versions de Kasten. Le script traite l'absence comme `namespace` et ne s'appuie pas sur ce label pour décider.
+- `k10.kasten.io/appType` peut être absent sur les restore points créés par d'anciennes versions de Kasten. **[disponible]** présent sur l'intégralité de l'inventaire en 9.0.3, valeur `namespace`. Le script traite l'absence comme `namespace` et ne s'appuie pas sur ce label pour décider.
 
-## 9. Tests réalisés
+## 9. Validation en laboratoire
+
+Constats relevés sur un cluster OpenShift 4.20 (Kubernetes 1.33) portant
+**Kasten K10 9.0.3**, sur un inventaire de 8 `RestorePointContents`.
+Aucune exécution `--apply` n'a été faite : tout ce qui suit vient de lectures
+et de dry-runs.
+
+### Ce qui est confirmé sur 9.0.3
+
+| Hypothèse | Statut |
+|---|---|
+| Le label `k10.kasten.io/exportProfile` est bien émis sur les restore points exportés | **[disponible]** présent sur 6 des 8 objets, avec des valeurs de profil réelles |
+| Son absence identifie un snapshot local | **[disponible]** les 2 objets sans le label sont les snapshots locaux, classés comme tels par le script |
+| Le label n'est jamais émis avec une valeur vide | **[non vérifié]** aucune valeur vide sur cet échantillon, mais 6 objets ne prouvent rien. Le moteur teste désormais la présence du label et non sa valeur, l'hypothèse n'a donc plus besoin d'être vraie |
+| `RestorePointContent` est cluster-scoped | **[disponible]** confirmé par `oc api-resources` |
+| `status.state`, `status.actionTime`, `status.scheduledTime`, `status.restorePointRef` sont présents | **[disponible]** présents sur les 8 objets |
+| `k10.kasten.io/appName` et `appNamespace` sont toujours renseignés | **[non vérifié]** présents sur les 8, mais tous sont `Bound`. Le cas à risque reste un objet `Unbound` sans `appName` |
+
+Dry-run de contrôle : 8 objets inventoriés, 2 snapshots locaux, 6 exports,
+0 candidat. Les 6 exports sortent en `KEEP export-restorepoint`, les 2
+snapshots locaux en `KEEP min-keep-guard` puisque chacun est le seul de son
+application. La classification recoupe exactement la présence du label.
+
+### Ce que le laboratoire a corrigé
+
+- **`RestorePointContent` n'est pas un CRD.** Kasten le sert par une APIService
+  agrégée, `v1alpha1.apps.kio.kasten.io` vers `aggregatedapis-svc`. Le contrôle
+  `oc get crd` de `check_prereqs` échoue donc sur toute installation normale.
+  Il émettait un avertissement accusant le RBAC à tort ; c'est désormais une
+  ligne d'information.
+- **La version K10 se lit dans un label**, `app.kubernetes.io/version` du
+  déploiement `app=k10`. L'image est référencée par digest et n'apprend rien.
+  Le script lit maintenant le label en priorité.
+
+### Ce qui reste à valider
+
+- **8.5.x.** Rien de ce qui précède n'a été vérifié sur cette version.
+- **`status.physicalSizeBytes` et `logicalSizeBytes`** sont absents des 8
+  objets, qui sont tous de type `appConfigOnly`, sans données de volume. Le
+  script les défaute à 0, donc `reclaimable_bytes` et la ligne « Taille
+  physique candidate » rapportent 0. À revalider sur un cluster portant de
+  vrais snapshots de volumes avant de se fier à ces chiffres.
+- **Comportement d'un export dont le snapshot source a été retiré.** Non
+  testé : cela suppose une suppression réelle.
+- **Un objet `Unbound` sans `appName`**, cas qui ferait s'effondrer le
+  regroupement par application. Absent de cet inventaire.
+- Un label supplémentaire, `k10.kasten.io/exportType` (valeur observée
+  `appConfigOnly`), co-occurre exactement avec `exportProfile`. Le script ne
+  l'utilise pas. Piste pour un discriminant de secours.
+
+## 10. Tests réalisés
 
 Le moteur de décision a été validé hors cluster sur un jeu de 17 `RestorePointContents` simulés couvrant : export récent et export très ancien, snapshot dans le seuil, snapshot hors seuil avec policy active, snapshot dont la policy a été supprimée, snapshot on-demand, snapshot en state `Unbound`, snapshot porteur du label d'exemption, application n'ayant qu'un seul snapshot, horodatage non parsable, namespace exclu, inventaire vide.
 
