@@ -18,7 +18,8 @@
 # Cible produit  : Veeam Kasten 8.5.x / 9.0.x  (CRD apps.kio.kasten.io/v1alpha1)
 # Plateformes    : OpenShift 4.x (oc) et Kubernetes vanilla (kubectl)
 # Dependances    : oc ou kubectl, jq >= 1.6, bash >= 4, coreutils
-#                  (date, mktemp, wc, tr, cat, cp, mv, tee, sleep, basename).
+#                  (date, mktemp, rm, mkdir, wc, tr, cat, cp, mv, tee, sleep,
+#                  basename).
 #                  Ni sed, ni awk, ni grep : toute mise en forme passe par jq.
 #                  Aucune syntaxe GNU specifique, le script tourne aussi sur BSD.
 #
@@ -103,6 +104,11 @@ die()  { err "$*"; exit 1; }
 # d'un jq ou d'un utilitaire propage son propre code via 'set -e' (jq sort en
 # 5 sur une erreur de programme). 'set -E' plus haut le fait suivre dans les
 # fonctions et les sous-shells.
+#
+# PORTEE REELLE, a connaitre : bash suspend errexit ET ce piege dans toute
+# fonction appelee au sein d'une liste '||' ou '&&', ou en condition de 'if'.
+# C'est le cas de purge() dans main(), appelee en 'purge || rc=$?'. Aucun
+# echec n'y remonte tout seul : purge() teste donc chacun des siens.
 trap 'err "Erreur inattendue (ligne $LINENO)"; exit 1' ERR
 
 readonly DEF_RETENTION_DAYS="$RETENTION_DAYS"
@@ -520,9 +526,9 @@ summarize() {
 }
 
 write_metrics() {
-  [[ -z "$METRICS_FILE" ]] && return 0
+  if [[ -z "$METRICS_FILE" ]]; then return 0; fi
   local tmp="${METRICS_FILE}.$$"
-  cat > "$tmp" <<EOF
+  if ! cat > "$tmp" <<EOF
 # HELP k10_janitor_last_run_timestamp_seconds Horodatage de la derniere execution.
 # TYPE k10_janitor_last_run_timestamp_seconds gauge
 k10_janitor_last_run_timestamp_seconds $(date -u +%s)
@@ -551,7 +557,16 @@ k10_janitor_failed_total ${FAILED:-0}
 # TYPE k10_janitor_reclaimable_bytes gauge
 k10_janitor_reclaimable_bytes $RECLAIM_BYTES
 EOF
-  mv "$tmp" "$METRICS_FILE"
+  then
+    warn "Ecriture des metriques impossible : $tmp"
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$METRICS_FILE"; then
+    warn "Deplacement des metriques impossible vers $METRICS_FILE"
+    rm -f "$tmp"
+    return 1
+  fi
   log "Metriques Prometheus : $METRICS_FILE"
 }
 
@@ -565,20 +580,28 @@ purge() {
     return 0
   fi
 
+  # Le garde-fou de l'invariant 6 ne doit dependre d'aucun ordre d'appel.
+  # summarize() calcule le meme OVER_CAP pour le rapport et les metriques ;
+  # purge() ne lui fait pas confiance et recalcule pour son propre compte.
+  local over_cap=0
+  if [[ "$MAX_DELETIONS" -gt 0 && "$CANDIDATES" -gt "$MAX_DELETIONS" ]]; then
+    over_cap=1
+  fi
+
   # Le plafond est un frein a la suppression : il n'a de sens que la ou une
   # suppression peut avoir lieu. En dry-run le rapport sort complet, le
   # depassement est signale, et le code retour reste 0 - sinon le tout premier
   # run planifie sur un cluster reellement encrasse marque le Job en echec.
   if [[ $DRY_RUN -eq 1 ]]; then
     log "DRY-RUN : $CANDIDATES RestorePointContents seraient supprimes. Aucune action effectuee."
-    if [[ $OVER_CAP -eq 1 ]]; then
+    if [[ $over_cap -eq 1 ]]; then
       warn "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : un --apply serait refuse en l'etat."
     fi
     log "Relancer avec --apply pour executer la purge."
     return 0
   fi
 
-  if [[ $OVER_CAP -eq 1 ]]; then
+  if [[ $over_cap -eq 1 ]]; then
     err "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : abandon par securite."
     err "Verifier le rapport, puis relancer avec un plafond adapte si le resultat est attendu."
     return 2
@@ -587,32 +610,46 @@ purge() {
   warn "APPLY : suppression de $CANDIDATES RestorePointContents."
   warn "La suppression est definitive et prime sur la retention des policies."
 
-  local name
+  # purge() est appelee en 'purge || rc=$?' : bash y suspend errexit ET le
+  # piege ERR pour toute la duree de la fonction. Aucun echec ne remonte tout
+  # seul ici, chacun doit donc etre teste explicitement. C'est la seule
+  # fonction qui supprime : un echec avale y serait une perte de trace.
+  local name audit_errors=0
   while IFS= read -r name; do
-    [[ -z "$name" ]] && continue
+    if [[ -z "$name" ]]; then continue; fi
     if "$CLI" delete "$RPC_CRD" "$name" --wait=false >/dev/null 2>"$WORKDIR/del.err"; then
       DELETED=$((DELETED + 1))
       printf '%s [%-5s] deleted %s=%s\n' "$(_ts)" "AUDIT" "$RPC_CRD" "$name" >&2
-      jq -c --arg n "$name" --arg ts "$(_ts)" \
-        'select(.name==$n) | . + {deletedAt: $ts, deleteResult: "ok"}' \
-        "$WORKDIR/decisions.jsonl" >> "$REPORT_JSONL.audit"
+      if ! jq -c --arg n "$name" --arg ts "$(_ts)" \
+          'select(.name==$n) | . + {deletedAt: $ts, deleteResult: "ok"}' \
+          "$WORKDIR/decisions.jsonl" >> "$REPORT_JSONL.audit"; then
+        audit_errors=$((audit_errors + 1))
+      fi
     else
       FAILED=$((FAILED + 1))
       err "Echec suppression $name : $(tr '\n' ' ' < "$WORKDIR/del.err")"
-      jq -c --arg n "$name" --arg ts "$(_ts)" --arg e "$(tr '\n' ' ' < "$WORKDIR/del.err")" \
-        'select(.name==$n) | . + {deletedAt: $ts, deleteResult: "failed", error: $e}' \
-        "$WORKDIR/decisions.jsonl" >> "$REPORT_JSONL.audit"
+      if ! jq -c --arg n "$name" --arg ts "$(_ts)" --arg e "$(tr '\n' ' ' < "$WORKDIR/del.err")" \
+          'select(.name==$n) | . + {deletedAt: $ts, deleteResult: "failed", error: $e}' \
+          "$WORKDIR/decisions.jsonl" >> "$REPORT_JSONL.audit"; then
+        audit_errors=$((audit_errors + 1))
+      fi
     fi
   done < <(jq -r 'select(.decision=="DELETE") | .name' "$WORKDIR/decisions.jsonl")
 
   log "Suppressions : $DELETED reussies, $FAILED en echec."
-  [[ -f "$REPORT_JSONL.audit" ]] && log "Piste d'audit : $REPORT_JSONL.audit"
+  if [[ -f "$REPORT_JSONL.audit" ]]; then log "Piste d'audit : $REPORT_JSONL.audit"; fi
 
   if [[ "$WAIT_RETIRE" -gt 0 && "$DELETED" -gt 0 ]]; then
     wait_for_retire
   fi
 
-  [[ "$FAILED" -gt 0 ]] && return 1
+  if [[ "$audit_errors" -gt 0 ]]; then
+    err "$audit_errors ligne(s) de piste d'audit non ecrite(s) dans $REPORT_JSONL.audit"
+    err "Des suppressions ont eu lieu sans trace fichier complete. Les lignes AUDIT"
+    err "de la sortie d'erreur restent la trace de reference."
+    return 1
+  fi
+  if [[ "$FAILED" -gt 0 ]]; then return 1; fi
   return 0
 }
 
@@ -640,7 +677,10 @@ main() {
   summarize
   local rc=0
   purge || rc=$?
-  write_metrics
+  # Les metriques relevent de l'observabilite : leur echec ne doit pas ecraser
+  # le code retour de la purge, seule information qui engage des donnees.
+  # write_metrics avertit deja par elle-meme.
+  write_metrics || true
   exit $rc
 }
 

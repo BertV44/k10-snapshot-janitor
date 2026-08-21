@@ -184,8 +184,14 @@ MOCK
   # mock dont la lecture des policies echoue : droit RBAC 'list' manquant
   sed 's#^  \*"get policies.*#  *"get policies"*) exit 1 ;;#' \
     "$WORK/bin/kubectl" > "$WORK/bin/kubectl-nopolicies"
+  # mock rendant la piste d'audit inecrivable : au premier delete il cree un
+  # repertoire a l'emplacement du fichier d'audit, ce qui fait echouer le '>>'.
+  # Simule un PVC de rapports sature pendant un --apply.
+  sed 's#^  \*delete\*).*#  *delete*) for f in "'"$WORK"'/reports"/*.jsonl; do [ -e "$f" ] \&\& mkdir -p "$f.audit"; done; echo "DELETE ${*: -2:1}" >> "'"$WORK"'/deleted.log"; exit 0 ;;#' \
+    "$WORK/bin/kubectl" > "$WORK/bin/kubectl-noaudit"
   chmod +x "$WORK/bin/kubectl" "$WORK/bin/kubectl-ro" \
-           "$WORK/bin/kubectl-nok10" "$WORK/bin/kubectl-nopolicies"
+           "$WORK/bin/kubectl-nok10" "$WORK/bin/kubectl-nopolicies" \
+           "$WORK/bin/kubectl-noaudit"
 }
 
 # ------------------------------- Helpers -------------------------------------
@@ -339,7 +345,7 @@ print(cj['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['ar
   built="$(cd "$WORK/globtest" && env RETENTION_DAYS=7 K10_NAMESPACE=kasten-io \
       MIN_KEEP=1 MAX_DELETIONS=50 WAIT_RETIRE=0 PURGE_APPLY=false \
       CONSERVATIVE_MODE=false EXCLUDE_NAMESPACES='prod-*' EXCLUDE_APPS='payments' \
-      INCLUDE_NAMESPACES='dev' \
+      INCLUDE_NAMESPACES='dev' EXCLUDE_POLICIES='daily-prod' \
       bash "$WORK/args-echo.sh" 2>/dev/null | tr '\n' ' ')"
   assert_eq "1" "$(printf '%s' "$built" | jq -Rr '[splits(" ")] | map(select(. == "prod-*")) | length')" \
     "le namespace exclu reste litteral, sans expansion glob"
@@ -349,6 +355,8 @@ print(cj['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['ar
     "EXCLUDE_APPS cable sur --exclude-app"
   assert_eq "1" "$(printf '%s' "$built" | jq -Rr '[splits(" ")] | map(select(. == "--include-namespace")) | length')" \
     "INCLUDE_NAMESPACES cable sur --include-namespace"
+  assert_eq "1" "$(printf '%s' "$built" | jq -Rr '[splits(" ")] | map(select(. == "--exclude-policy")) | length')" \
+    "EXCLUDE_POLICIES cable sur --exclude-policy"
 else
   skip "python3/pyyaml absent, validation des manifests ignoree"
 fi
@@ -473,6 +481,26 @@ assert_eq "0" "$rc" "code retour 0"
 assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-offset-plus)"  "decalage positif conserve"
 assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-offset-moins)" "decalage negatif conserve"
 assert_eq "" "$(candidates)" "aucun candidat"
+
+head_ "Cas 27 : piste d'audit inecrivable pendant un --apply"
+reset_reports
+CLI_BIN=kubectl-noaudit run -d 7 --exclude-namespace protected --max-deletions 100 --apply && rc=0 || rc=$?
+assert_eq "5" "$(wc -l < "$WORK/deleted.log" | tr -d ' ')" "les suppressions ont bien eu lieu"
+assert_eq "1" "$rc" "un audit incomplet apres suppression ne peut pas sortir en 0"
+
+head_ "Cas 28 : un echec d'ecriture des metriques n'ecrase pas le code retour"
+reset_reports
+run -d 7 --exclude-namespace protected --max-deletions 3 --apply \
+    --metrics-file "$WORK/inexistant/m.prom" && rc=0 || rc=$?
+assert_eq "2" "$rc" "le plafond depasse reste en code 2 malgre l'echec des metriques"
+assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "aucune suppression"
+
+head_ "Cas 29 : --dry-run neutralise un --apply place plus tot"
+reset_reports
+run -d 7 --exclude-namespace protected --max-deletions 100 --apply --dry-run && rc=0 || rc=$?
+assert_eq "0" "$rc" "code retour 0"
+assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "aucune suppression malgre le --apply anterieur"
+assert_eq "5" "$(candidates | wc -w | tr -d ' ')" "le rapport reste complet"
 
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs, %d ignores\033[0m\n' "$PASS" "$FAIL" "$SKIP"
