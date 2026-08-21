@@ -95,7 +95,8 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 
 # --------------------------------- Logging -----------------------------------
 _ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-log()  { [[ $QUIET -eq 1 ]] && return 0; printf '%s [%-5s] %s\n' "$(_ts)" "INFO" "$*" >&2; }
+log()  { if [[ $QUIET -eq 1 ]]; then return 0; fi
+         printf '%s [%-5s] %s\n' "$(_ts)" "INFO" "$*" >&2; }
 warn() { printf '%s [%-5s] %s\n' "$(_ts)" "WARN" "$*" >&2; }
 err()  { printf '%s [%-5s] %s\n' "$(_ts)" "ERROR" "$*" >&2; }
 die()  { err "$*"; exit 1; }
@@ -659,7 +660,10 @@ wait_for_retire() {
   while [[ $(date -u +%s) -lt $deadline ]]; do
     pending="$("$CLI" get "$RETIRE_CRD" -o json 2>/dev/null \
       | jq '[.items[] | select(.status.state != "Complete" and .status.state != "Failed" and .status.state != "Skipped")] | length' 2>/dev/null || echo 0)"
-    [[ "${pending:-0}" -eq 0 ]] && { log "Tous les RetireActions sont termines."; return 0; }
+    if [[ "${pending:-0}" -eq 0 ]]; then
+      log "Tous les RetireActions sont termines."
+      return 0
+    fi
     log "RetireActions en cours : $pending"
     sleep 15
   done
