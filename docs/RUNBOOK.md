@@ -1,102 +1,108 @@
-# Purge automatisée des snapshots K10 hors seuil d'âge
+# Automated housekeeping of K10 snapshots past an age threshold
 
-Versions cibles : **Veeam Kasten 8.5.x et 9.0.x** (CRD `apps.kio.kasten.io/v1alpha1`), OpenShift 4.x et Kubernetes 1.27+.
-CLI : `oc` en priorité (autodétection OpenShift), repli `kubectl`.
+Target versions: **Veeam Kasten 8.5.x and 9.0.x** (`apps.kio.kasten.io/v1alpha1`), OpenShift 4.x and Kubernetes 1.27+.
+CLI: `oc` first (OpenShift autodetection), falling back to `kubectl`.
 
-## Contenu
+## Contents
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `bin/k10-snapshot-janitor.sh` | Script de purge, dry-run par défaut |
-| `deploy/cronjob.yaml` | ServiceAccount, RBAC least-privilege, ConfigMap de paramètres, PVC de rapports, CronJob quotidien |
-| `deploy/Containerfile` | Image UBI9-minimal + `oc` + `jq` pour le CronJob |
-| `test/run-tests.sh` | Suite de tests du moteur de decision, hors cluster |
+| `bin/k10-snapshot-janitor.sh` | The housekeeping script, dry-run by default |
+| `deploy/cronjob.yaml` | ServiceAccount, least-privilege RBAC, settings ConfigMap, reports PVC, daily CronJob |
+| `deploy/Containerfile` | UBI9-minimal image + `oc` + `jq` for the CronJob |
+| `test/run-tests.sh` | Offline test suite for the decision engine |
 
 ---
 
-## 1. Ce que le script cible, et pourquoi
+## 1. What the script targets, and why
 
-### Objet manipulé : `RestorePointContent`, pas `RestorePoint`
+### The object it acts on: `RestorePointContent`, not `RestorePoint`
 
-[disponible] La documentation est explicite : supprimer un `RestorePoint` **ne libère pas** les artefacts sous-jacents. Seule la suppression du `RestorePointContent` (cluster-scoped) déclenche un `RetireAction` qui réclame les snapshots et les données. Le script agit donc exclusivement sur les `RestorePointContents`.
+[available] The documentation is explicit: deleting a `RestorePoint` **does not release** the underlying artifacts. Only deleting the `RestorePointContent` (cluster-scoped) triggers a `RetireAction` that reclaims the snapshots and the data. The script therefore acts exclusively on `RestorePointContents`.
 
-### Discrimination snapshot local vs export
+### Local snapshot vs export
 
-Le périmètre demandé est **snapshot uniquement, jamais export**. Le discriminant retenu est le label `k10.kasten.io/exportProfile` :
+The requested scope is **snapshots only, never exports**. The discriminator is the `k10.kasten.io/exportProfile` label:
 
-- label absent  -> snapshot local, éligible
-- label présent -> restore point exporté vers un location profile, **toujours conservé**
+- label absent  -> local snapshot, eligible
+- label present -> restore point exported to a location profile, **always kept**
 
-[à valider en lab sur ta version cible] La page « Restore Points » de la doc 9.0.3 ne liste explicitement que `appName`, `appNamespace` et `appType` dans sa section sur les labels automatiques. Le label `exportProfile` est documenté par ailleurs comme moyen de distinguer les restore points exportés. Avant la première exécution en `--apply`, contrôle sur ton cluster :
+The discriminator is the *presence* of the label, not its value. Kubernetes allows an empty label value, and an export with an empty value is still an export.
+
+[validate in a lab against your target version] The "Restore Points" page of the 9.0.3 documentation only lists `appName`, `appNamespace` and `appType` in its section on automatic labels. The `exportProfile` label is documented elsewhere as the way to distinguish exported restore points. Before the first `--apply` run, check on your own cluster:
 
 ```bash
-# Combien de RPC exportés vs locaux ?
+# How many exported RPC versus local ones?
 oc get restorepointcontents.apps.kio.kasten.io \
   -l 'k10.kasten.io/exportProfile' -o name | wc -l
 oc get restorepointcontents.apps.kio.kasten.io \
   -l '!k10.kasten.io/exportProfile' -o name | wc -l
 ```
 
-Croise ce comptage avec le dashboard K10. Si l'écart n'est pas cohérent, ne passe pas en `--apply`.
+Cross-check those counts against the K10 dashboard. If the numbers do not line up, do not move to `--apply`.
 
-### Horodatage de référence
+### Reference timestamp
 
-Le script prend, dans cet ordre : `status.actionTime`, puis `status.scheduledTime`, puis `metadata.creationTimestamp`. [disponible] `scheduledTime` peut être `null` pour les actions on-demand, d'où l'ordre retenu. Un horodatage non parsable donne une décision `KEEP` avec la raison `timestamp-unparseable`, jamais une suppression.
+The script takes, in this order: `status.actionTime`, then `status.scheduledTime`, then `metadata.creationTimestamp`. [available] `scheduledTime` can be `null` for on-demand actions, hence the ordering. An unparsable timestamp yields a `KEEP` decision with the reason `timestamp-unparseable`, never a deletion.
 
-### Avertissement de fond
+A timestamp carrying a numeric UTC offset (`+02:00`, `-04:00`) is treated as unparsable and also resolves to `KEEP`. This is deliberate: converting the offset by hand could age an object, and an object that looks older than it is gets deleted. On 9.0.3 every timestamp is Z-suffixed.
 
-> [disponible, docs.kasten.io] « Deletion of a RestorePointContent is permanent and overrides retention by a Policy. »
+### The underlying warning
 
-Un snapshot de plus de X jours n'est **pas** nécessairement un orphelin. Une policy GFS légitime conserve des points mensuels ou annuels. Lancer le script avec un seuil de 7 jours et sans restriction supprimera ces points malgré la policy. C'est pour cette raison que le script propose deux modes de restriction, décrits ci-dessous, et que le mode conservateur est celui à privilégier sur un cluster de production.
+> [available, docs.kasten.io] "Deletion of a RestorePointContent is permanent and overrides retention by a Policy."
 
-### Rappel du mécanisme natif
+A snapshot older than X days is **not** necessarily an orphan. A legitimate GFS policy keeps monthly and yearly points. Running the script with a 7-day threshold and no restriction will delete those points despite the policy. That is why the script offers the two restriction modes described below, and why the conservative mode is the one to prefer on a production cluster.
 
-[disponible] Le Garbage Collector K10 nettoie déjà les `RestorePointContents` des backups manuels dont le champ `spec.expiresAt` est dépassé (réglable via l'API ou la page de snapshot manuel de l'UI). Ce script couvre ce que le GC ne couvre pas : les snapshots sans `expiresAt`, ceux issus de policies supprimées, et ceux d'applications retirées du cluster.
+### The native mechanism, for reference
+
+[available] The K10 Garbage Collector already cleans up the `RestorePointContents` of manual backups whose `spec.expiresAt` has passed (settable through the API or the manual snapshot page in the UI). This script covers what the GC does not: snapshots with no `expiresAt`, those from deleted policies, and those of applications removed from the cluster.
 
 ---
 
-## 2. Modes de sélection
+## 2. Selection modes
 
-| Mode | Options | Ce qui est supprimé |
+| Mode | Options | What gets deleted |
 |---|---|---|
-| Âge seul (par défaut) | `-d 7` | tout snapshot local de plus de 7 jours, y compris ceux couverts par une policy active |
-| Orphelins de policy | `--orphan-policy-only` | snapshots on-demand (sans label `policyName`) et snapshots dont la policy référencée n'existe plus |
-| Applications disparues | `--require-unbound` | snapshots dont le `RestorePointContent` est en state `Unbound`, c'est-à-dire dont l'application ou le namespace a été supprimé |
-| Conservateur (recommandé) | `--require-unbound --orphan-policy-only` | intersection des deux : uniquement les vrais orphelins |
+| Age only (default) | `-d 7` | every local snapshot older than 7 days, including those covered by an active policy |
+| Policy orphans | `--orphan-policy-only` | on-demand snapshots (no `policyName` label) and snapshots whose referenced policy no longer exists |
+| Vanished applications | `--require-unbound` | snapshots whose `RestorePointContent` is in state `Unbound`, meaning the application or namespace has been deleted |
+| Conservative (recommended) | `--require-unbound --orphan-policy-only` | the intersection of both: genuine orphans only |
 
-Le mode conservateur correspond à `CONSERVATIVE_MODE: "true"` dans la ConfigMap.
+The conservative mode corresponds to `CONSERVATIVE_MODE: "true"` in the ConfigMap.
 
-## 3. Garde-fous
+## 3. Guards
 
-| Garde-fou | Comportement |
+| Guard | Behaviour |
 |---|---|
-| Dry-run par défaut | Aucune suppression sans `--apply`. Le rapport est produit dans tous les cas. |
-| `--min-keep N` | Conserve toujours les N snapshots les plus récents par application (`appNamespace/appName`), même hors seuil. Défaut 1 : aucune application ne peut se retrouver sans aucun point de restauration. |
-| `--wait-retire N` | Après un `--apply`, attendre jusqu'à N secondes que les `RetireActions` déclenchées passent en `Complete`. 0 = pas d'attente, valeur par défaut du CronJob. Le dépassement du délai est un avertissement, pas une erreur : sur de gros exports, la réclamation est longue. |
-| `--max-deletions N` | Sous `--apply`, abandon immédiat en code retour 2 si le nombre de candidats dépasse N. Défaut 50. Protège d'une erreur de filtre ou d'un label manquant. En dry-run, le dépassement est signalé dans le résumé et par la métrique `k10_janitor_over_cap`, mais le code retour reste 0 : un rapport d'identification n'est pas un échec. |
-| `--exclude-namespace`, `--exclude-policy`, `--exclude-app` | Exclusions répétables. |
-| `--include-namespace` | Restriction à un périmètre, pour un déploiement progressif. |
-| Label d'exemption | `k10-janitor/exempt=true` sur un `RestorePointContent` le sort définitivement du périmètre. |
-| Exports intouchables | `--include-exports` existe mais est déconseillé et non utilisé par le CronJob. |
+| Dry-run by default | No deletion without `--apply`. The report is produced either way. |
+| `--dry-run` | Forces report-only mode, and overrides an `--apply` placed earlier on the command line. |
+| `--min-keep N` | Always keeps the N most recent snapshots per application (`appNamespace/appName`), even past the threshold. Default 1, and **0 is rejected outright**: no application may be left without a restore point. |
+| `--wait-retire N` | After an `--apply`, wait up to N seconds for the triggered `RetireActions` to reach `Complete`. 0 = no wait, the CronJob default. A timeout is a warning, not an error: reclamation takes a long time on large exports. |
+| `--max-deletions N` | Under `--apply`, aborts immediately with exit code 2 if the number of candidates exceeds N. Default 50. Protects against a filter mistake or a missing label. In dry-run the overflow is reported in the summary and through the `k10_janitor_over_cap` metric, but the exit code stays 0: an identification report is not a failure. |
+| Missing policy data | If `--orphan-policy-only` is requested and the policy list is unreadable or empty, the run aborts with exit code 3 rather than dropping the restrictive filter. Without a reference policy, every snapshot would look orphaned. |
+| `--exclude-namespace`, `--exclude-policy`, `--exclude-app` | Repeatable exclusions. |
+| `--include-namespace` | Scope restriction, for a progressive rollout. |
+| Exemption label | `k10-janitor/exempt=true` on a `RestorePointContent` removes it from the scope permanently. The key is settable through `--exempt-label` only, never from the environment, so a ConfigMap key cannot silently void every exemption. |
+| Exports untouched | `--include-exports` exists but is discouraged and never used by the CronJob. |
 
-Exempter un objet précis :
+Exempting a specific object:
 
 ```bash
-oc label restorepointcontents.apps.kio.kasten.io <nom> k10-janitor/exempt=true
+oc label restorepointcontents.apps.kio.kasten.io <name> k10-janitor/exempt=true
 ```
 
-## 4. Rapports et audit
+## 4. Reports and audit
 
-Chaque exécution écrit dans `--report-dir` quatre fichiers horodatés, le dernier uniquement sous `--apply` par `run_id` :
+Every run writes four timestamped files per `run_id` into `--report-dir`, the last one only under `--apply`:
 
-- `k10-janitor-<run_id>.csv` : une ligne par `RestorePointContent` inventorié, avec `decision`, `reason`, âge, application, policy, tailles, rang
-- `k10-janitor-<run_id>.jsonl` : même contenu en JSON Lines, exploitable par `jq` ou une ingestion SIEM
-- `k10-janitor-<run_id>.summary.txt` : synthèse lisible, dont la répartition des raisons de conservation
-- `k10-janitor-<run_id>.jsonl.audit` : produit uniquement en mode `--apply`, une ligne par suppression avec `deletedAt` et `deleteResult`
+- `k10-janitor-<run_id>.csv`: one line per inventoried `RestorePointContent`, with `decision`, `reason`, age, application, policy, sizes and rank
+- `k10-janitor-<run_id>.jsonl`: the same content as JSON Lines, consumable by `jq` or a SIEM ingest
+- `k10-janitor-<run_id>.summary.txt`: readable synthesis, including the breakdown of KEEP reasons
+- `k10-janitor-<run_id>.jsonl.audit`: produced only under `--apply`, one line per deletion with `deletedAt` and `deleteResult`
 
-Chaque suppression est également tracée sur stderr avec le préfixe `AUDIT`, ce qui la rend récupérable dans les logs du pod et par la chaîne de collecte du cluster.
+Every deletion is also traced on stderr with the `AUDIT` prefix, which makes it recoverable from the pod logs and by the cluster log collection chain. If an audit line cannot be written to the file, the run exits 1 and says how many lines are missing: the stderr `AUDIT` lines remain the reference trail.
 
-Métriques Prometheus via `--metrics-file` (format textfile collector) :
+Prometheus metrics through `--metrics-file` (textfile collector format):
 
 ```
 k10_janitor_last_run_timestamp_seconds
@@ -110,34 +116,33 @@ k10_janitor_failed_total
 k10_janitor_reclaimable_bytes
 ```
 
-[non vérifié] Le textfile collector n'est pas exploitable directement depuis un pod de CronJob sans node-exporter monté sur le même volume. Pour une remontée Grafana, le plus simple est un Pushgateway ou un scrape du PVC par un sidecar. À arbitrer selon le socle de monitoring du client.
+[unverified] The textfile collector is not directly usable from a CronJob pod without node-exporter mounted on the same volume. For a Grafana dashboard, the simplest options are a Pushgateway or a sidecar scraping the PVC. To be decided against the customer monitoring stack.
 
-## 5. Codes retour
+## 5. Exit codes
 
-| Code | Signification |
+| Code | Meaning |
 |---|---|
-| 0 | Succès, ou dry-run terminé |
-| 1 | Au moins une suppression en échec, ou erreur d'exécution |
-| 2 | Plafond `--max-deletions` dépassé sous `--apply`, aucune suppression effectuée |
-| 3 | Prérequis manquant : `jq`, `oc`/`kubectl` ou API injoignable **ou** `--orphan-policy-only` demandé alors que les policies sont illisibles ou qu'aucune n'a été trouvée dans le namespace K10 |
+| 0 | Success, or dry-run completed |
+| 1 | At least one deletion failed, the audit trail could not be written, or a runtime error |
+| 2 | `--max-deletions` cap exceeded under `--apply`, nothing deleted |
+| 3 | Missing prerequisite: `jq`, `oc`/`kubectl` or an unreachable API, **or** `--orphan-policy-only` requested while the policies are unreadable or none was found in the K10 namespace |
 
-Sur une sortie 1 de validation d'arguments et sur toutes les sorties 3, aucun
-rapport n'est écrit : l'abandon a lieu avant `write_reports`. Les métriques ne
-sont pas rafraîchies non plus, le fichier `.prom` conserve donc les valeurs du
-run précédent. Surveiller `k10_janitor_last_run_timestamp_seconds` pour
-détecter ces abandons.
+On an argument-validation exit 1 and on every exit 3, no report is written: the
+run aborts before `write_reports`. The metrics are not refreshed either, so the
+`.prom` file keeps the previous run values. Watch
+`k10_janitor_last_run_timestamp_seconds` to detect those aborts.
 
-## 6. Mise en oeuvre
+## 6. Rollout
 
-### Exécution manuelle depuis un bastion
+### Manual run from a bastion
 
 ```bash
 chmod +x bin/k10-snapshot-janitor.sh
 
-# Identification seule
+# Report only
 ./bin/k10-snapshot-janitor.sh -d 7 -r ./reports
 
-# Périmètre réel, mode conservateur, suppression
+# Real scope, conservative mode, actual deletion
 ./bin/k10-snapshot-janitor.sh -d 7 \
   --require-unbound --orphan-policy-only \
   --exclude-namespace prod-db \
@@ -145,41 +150,41 @@ chmod +x bin/k10-snapshot-janitor.sh
   -r ./reports --apply
 ```
 
-### CronJob in-cluster
+### In-cluster CronJob
 
 ```bash
 # 1. Image
 podman build -t k10-snapshot-janitor:1.0.0 -f deploy/Containerfile .
-# puis push vers le registre interne, et remplacer REGISTRY/k10-snapshot-janitor:1.0.0
-# dans deploy/cronjob.yaml
+# then push it to the internal registry, and replace
+# REGISTRY/k10-snapshot-janitor:1.0.0 in deploy/cronjob.yaml
 
-# 2. Script dans une ConfigMap
+# 2. Script in a ConfigMap
 oc -n kasten-io create configmap k10-snapshot-janitor-script \
   --from-file=k10-snapshot-janitor.sh=./bin/k10-snapshot-janitor.sh
 
-# 3. RBAC, PVC, CronJob (livré en dry-run)
+# 3. RBAC, PVC, CronJob (ships in dry-run)
 oc apply -f deploy/cronjob.yaml
 
-# 4. Test immédiat sans attendre 03:00
+# 4. Immediate test, without waiting for 03:00
 oc -n kasten-io create job k10-janitor-manual-01 \
   --from=cronjob/k10-snapshot-janitor
 oc -n kasten-io logs -f job/k10-janitor-manual-01
 ```
 
-Bascule en suppression réelle, après validation des rapports :
+Switching to real deletion, once the reports have been reviewed:
 
 ```bash
 oc -n kasten-io patch configmap k10-snapshot-janitor-config \
   --type merge -p '{"data":{"PURGE_APPLY":"true"}}'
 ```
 
-Consultation des rapports persistés :
+Reading the persisted reports:
 
 ```bash
 oc -n kasten-io debug job/k10-janitor-manual-01 -- ls -l /reports
 ```
 
-Mise à jour du script après modification :
+Updating the script after a change:
 
 ```bash
 oc -n kasten-io create configmap k10-snapshot-janitor-script \
@@ -187,76 +192,100 @@ oc -n kasten-io create configmap k10-snapshot-janitor-script \
   --dry-run=client -o yaml | oc apply -f -
 ```
 
-## 7. Séquence de mise en production recommandée
+## 7. Recommended production sequence
 
-1. Dry-run manuel sur l'ensemble du cluster, seuil réaliste, sans exclusion. Lire le `summary.txt`, contrôler la répartition des raisons de conservation.
-2. Recouper la ligne `dont exports (jamais purges)` avec le nombre d'exports attendu. Un écart signifie que le discriminant `exportProfile` ne se comporte pas comme prévu sur cette version : arrêter là.
-3. Passer en `--apply` sur un seul namespace non critique avec `--include-namespace`, puis vérifier dans l'UI K10 que les points attendus ont disparu et que les `RetireActions` sont `Complete`.
-4. Élargir le périmètre en mode conservateur, `--max-deletions` bas au départ.
-5. Basculer `PURGE_APPLY` à `true` dans la ConfigMap et laisser le CronJob tourner.
+1. Manual dry-run across the whole cluster, realistic threshold, no exclusions. Read `summary.txt` and check the breakdown of KEEP reasons.
+2. Cross-check the `of which exports (never purged)` line against the expected number of exports. A discrepancy means the `exportProfile` discriminator does not behave as expected on this version: stop there.
+3. Move to `--apply` on a single non-critical namespace with `--include-namespace`, then verify in the K10 UI that the expected points are gone and that the `RetireActions` are `Complete`.
+4. Widen the scope in conservative mode, with a low `--max-deletions` to start with.
+5. Set `PURGE_APPLY` to `true` in the ConfigMap and let the CronJob run.
 
-## 8. Limites connues
+## 8. Known limitations
 
-- La réclamation d'espace n'est ni immédiate ni proportionnelle. [disponible] Déduplication, données partagées entre restore points, rétention de versions pour les backups immuables et fenêtres de sécurité peuvent retarder ou annuler le gain. Le champ `reclaimable_bytes` du rapport est une borne supérieure indicative fondée sur `status.physicalSizeBytes`. **[non vérifié]** ce champ était absent sur l'intégralité de l'inventaire du cluster de validation, où le script rapporte donc 0 : voir la section 9.
-- Le script ne touche pas aux `ClusterRestorePoints` (ressources cluster-scoped issues des `BackupClusterAction`). À traiter séparément si le besoin apparaît.
-- Le script ne cherche pas les `VolumeSnapshots` CSI orphelins au niveau storage, c'est-à-dire non référencés par un `RestorePointContent`. C'est un cas de fuite distinct, à traiter avec une logique dédiée.
-- `k10.kasten.io/appType` peut être absent sur les restore points créés par d'anciennes versions de Kasten. **[disponible]** présent sur l'intégralité de l'inventaire en 9.0.3, valeur `namespace`. Le script traite l'absence comme `namespace` et ne s'appuie pas sur ce label pour décider.
+- Space reclamation is neither immediate nor proportional. [available] Deduplication, data shared between restore points, version retention for immutable backups and safety windows can all delay or cancel the gain. The `reclaimable_bytes` field of the report is an indicative upper bound based on `status.physicalSizeBytes`. **[unverified]** that field was absent from the entire inventory of the validation cluster, where the script therefore reports 0: see section 9.
+- The script does not touch `ClusterRestorePoints` (cluster-scoped resources produced by `BackupClusterAction`). To be handled separately if the need arises.
+- The script does not look for orphaned CSI `VolumeSnapshots` at the storage layer, meaning those no longer referenced by any `RestorePointContent`. That is a distinct kind of leak and needs dedicated logic.
+- `k10.kasten.io/appType` can be absent on restore points created by older Kasten versions. **[available]** present across the entire 9.0.3 inventory, with the value `namespace`. The script treats absence as `namespace` and does not rely on this label to decide.
 
-## 9. Validation en laboratoire
+## 9. Lab validation
 
-Constats relevés sur un cluster OpenShift 4.20 (Kubernetes 1.33) portant
-**Kasten K10 9.0.3**, sur un inventaire de 8 `RestorePointContents`.
-Aucune exécution `--apply` n'a été faite : tout ce qui suit vient de lectures
-et de dry-runs.
+Findings from an OpenShift 4.20 cluster (Kubernetes 1.33) running
+**Kasten K10 9.0.3**, on an inventory of 8 `RestorePointContents`.
+No `--apply` run was performed: everything below comes from reads and dry-runs.
 
-### Ce qui est confirmé sur 9.0.3
+### Confirmed on 9.0.3
 
-| Hypothèse | Statut |
+| Assumption | Status |
 |---|---|
-| Le label `k10.kasten.io/exportProfile` est bien émis sur les restore points exportés | **[disponible]** présent sur 6 des 8 objets, avec des valeurs de profil réelles |
-| Son absence identifie un snapshot local | **[disponible]** les 2 objets sans le label sont les snapshots locaux, classés comme tels par le script |
-| Le label n'est jamais émis avec une valeur vide | **[non vérifié]** aucune valeur vide sur cet échantillon, mais 6 objets ne prouvent rien. Le moteur teste désormais la présence du label et non sa valeur, l'hypothèse n'a donc plus besoin d'être vraie |
-| `RestorePointContent` est cluster-scoped | **[disponible]** confirmé par `oc api-resources` |
-| `status.state`, `status.actionTime`, `status.scheduledTime`, `status.restorePointRef` sont présents | **[disponible]** présents sur les 8 objets |
-| `k10.kasten.io/appName` et `appNamespace` sont toujours renseignés | **[non vérifié]** présents sur les 8, mais tous sont `Bound`. Le cas à risque reste un objet `Unbound` sans `appName` |
+| The `k10.kasten.io/exportProfile` label is emitted on exported restore points | **[available]** present on 6 of the 8 objects, with real profile values |
+| Its absence identifies a local snapshot | **[available]** the 2 objects without it are the local snapshots, and the script classified them as such |
+| The label is never emitted with an empty value | **[unverified]** no empty value in this sample, but 6 objects prove little. The engine now tests the presence of the label rather than its value, so the assumption no longer needs to hold |
+| `RestorePointContent` is cluster-scoped | **[available]** confirmed through `oc api-resources` |
+| `status.state`, `status.actionTime`, `status.scheduledTime` and `status.restorePointRef` are present | **[available]** present on all 8 objects |
+| `k10.kasten.io/appName` and `appNamespace` are always populated | **[unverified]** present on all 8, but all of them are `Bound`. The risky case remains an `Unbound` object with no `appName` |
 
-Dry-run de contrôle : 8 objets inventoriés, 2 snapshots locaux, 6 exports,
-0 candidat. Les 6 exports sortent en `KEEP export-restorepoint`, les 2
-snapshots locaux en `KEEP min-keep-guard` puisque chacun est le seul de son
-application. La classification recoupe exactement la présence du label.
+Control dry-run: 8 objects inventoried, 2 local snapshots, 6 exports,
+0 candidates. The 6 exports came out as `KEEP export-restorepoint`, the 2 local
+snapshots as `KEEP min-keep-guard` since each is the only one of its
+application. The classification matches label presence exactly.
 
-### Ce que le laboratoire a corrigé
+### What the lab corrected
 
-- **`RestorePointContent` n'est pas un CRD.** Kasten le sert par une APIService
-  agrégée, `v1alpha1.apps.kio.kasten.io` vers `aggregatedapis-svc`. Le contrôle
-  `oc get crd` de `check_prereqs` échoue donc sur toute installation normale.
-  Il émettait un avertissement accusant le RBAC à tort ; c'est désormais une
-  ligne d'information.
-- **La version K10 se lit dans un label**, `app.kubernetes.io/version` du
-  déploiement `app=k10`. L'image est référencée par digest et n'apprend rien.
-  Le script lit maintenant le label en priorité.
+- **`RestorePointContent` is not a CRD.** Kasten serves it through an
+  aggregated APIService, `v1alpha1.apps.kio.kasten.io` to `aggregatedapis-svc`.
+  The `oc get crd` probe in `check_prereqs` therefore fails on every normal
+  install. It used to emit a warning blaming RBAC, which was simply wrong; it
+  is now an informational line.
+- **The K10 version lives in a label**, `app.kubernetes.io/version` on the
+  `app=k10` deployment. The image is referenced by digest and teaches nothing.
+  The script now reads the label first.
 
-### Ce qui reste à valider
+### Still to validate
 
-- **8.5.x.** Rien de ce qui précède n'a été vérifié sur cette version.
-- **`status.physicalSizeBytes` et `logicalSizeBytes`** sont absents des 8
-  objets, qui sont tous de type `appConfigOnly`, sans données de volume. Le
-  script les défaute à 0, donc `reclaimable_bytes` et la ligne « Taille
-  physique candidate » rapportent 0. À revalider sur un cluster portant de
-  vrais snapshots de volumes avant de se fier à ces chiffres.
-- **Comportement d'un export dont le snapshot source a été retiré.** Non
-  testé : cela suppose une suppression réelle.
-- **Un objet `Unbound` sans `appName`**, cas qui ferait s'effondrer le
-  regroupement par application. Absent de cet inventaire.
-- Un label supplémentaire, `k10.kasten.io/exportType` (valeur observée
-  `appConfigOnly`), co-occurre exactement avec `exportProfile`. Le script ne
-  l'utilise pas. Piste pour un discriminant de secours.
+- **8.5.x.** None of the above has been checked on that version.
+- **`status.physicalSizeBytes` and `logicalSizeBytes`** are absent from all 8
+  objects, which are all of type `appConfigOnly` with no volume data. The
+  script defaults them to 0, so `reclaimable_bytes` and the "Candidate physical
+  size" line both report 0. Revalidate on a cluster holding real volume
+  snapshots before trusting those figures.
+- **The behaviour of an export whose source snapshot has been retired.** Not
+  tested: it requires a real deletion.
+- **An `Unbound` object with no `appName`**, the case that would collapse the
+  per-application grouping. Absent from this inventory.
+- An additional label, `k10.kasten.io/exportType` (observed value
+  `appConfigOnly`), co-occurs exactly with `exportProfile`. The script does not
+  use it. A possible fallback discriminator.
 
-## 10. Tests réalisés
+## 10. Testing
 
-Le moteur de décision a été validé hors cluster sur un jeu de 17 `RestorePointContents` simulés couvrant : export récent et export très ancien, snapshot dans le seuil, snapshot hors seuil avec policy active, snapshot dont la policy a été supprimée, snapshot on-demand, snapshot en state `Unbound`, snapshot porteur du label d'exemption, application n'ayant qu'un seul snapshot, horodatage non parsable, namespace exclu, inventaire vide.
+The decision engine is validated offline against generated fixtures covering:
+recent and very old exports, an export whose `exportProfile` label carries an
+empty value, a snapshot within the threshold, a snapshot past the threshold
+with an active policy, a snapshot whose policy has been deleted, an on-demand
+snapshot, a snapshot in state `Unbound`, a snapshot carrying the exemption
+label, an application with a single snapshot, an unparsable timestamp, a
+non-string timestamp, timestamps with numeric offsets, an object with none of
+the three timestamp sources, an excluded namespace, and an empty inventory.
 
-Cas de sortie vérifiés : dry-run sans effet de bord, `--apply` avec piste d'audit complète, dépassement de `--max-deletions` sous `--apply` avec code 2 et zéro suppression, dépassement en dry-run avec code 0, échec de suppression avec code 1, `--min-keep 2`, `--include-namespace`, `--require-unbound --orphan-policy-only`.
+Exit paths covered: dry-run with no side effect, `--apply` with a complete
+audit trail, an unwritable audit trail during `--apply`, `--max-deletions`
+exceeded under `--apply` with exit 2 and zero deletions, the same overflow in
+dry-run with exit 0, a metrics write failure not overwriting the exit code, a
+failed deletion with exit 1, `--min-keep 2`, `--min-keep 0` rejected,
+`--include-namespace`, `--include-exports`, `--exclude-policy`,
+`--exclude-app`, `--dry-run` overriding an earlier `--apply`, and
+`--require-unbound --orphan-policy-only` with unreadable and with empty policy
+lists.
+
+Four guards are verified by mutation rather than by merely passing: retargeting
+the delete call at another resource, changing the age comparison from `<=` to
+`<`, removing `set -f` from the CronJob argument builder, and keying the export
+discriminator on the label value instead of its presence. Each makes a specific
+assertion fail.
+
+The suite generates its own fixtures and a fake `kubectl` binary. It contacts
+no cluster, and must stay that way. A skipped case is fatal: a suite that
+quietly runs at 97% would be worse than one that fails.
 
 ---
 

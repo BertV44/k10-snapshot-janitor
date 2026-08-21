@@ -79,6 +79,9 @@ the command line. `--wait-retire N` waits up to N seconds for the triggered
 
 Every run writes a CSV, a JSONL and a summary per `run_id`, plus a separate
 audit trail when `--apply` is used. Each decision carries an explicit reason.
+If an audit line cannot be written after a successful deletion, the run exits 1
+rather than reporting success: the `AUDIT` lines on stderr remain the reference
+trail.
 
 Deleting a `RestorePointContent` is permanent and overrides policy retention.
 A snapshot older than the threshold is not necessarily an orphan: a legitimate
@@ -98,7 +101,7 @@ procedure.
 ./test/run-tests.sh
 ```
 
-83 assertions, entirely offline: fixtures and a stub CLI are generated on the
+91 assertions, entirely offline: fixtures and a stub CLI are generated on the
 fly, no cluster is contacted. A skipped case is fatal — a suite that quietly
 runs at 97% is worse than one that fails, so `python3` and `pyyaml` are
 required for the manifest checks.
@@ -113,9 +116,12 @@ fail.
 | Code | Meaning |
 |---|---|
 | 0 | Success, or dry-run completed |
-| 1 | At least one deletion failed, or runtime error |
+| 1 | A deletion failed, the audit trail could not be written, or a runtime error |
 | 2 | `--max-deletions` ceiling exceeded under `--apply`, nothing deleted |
-| 3 | Missing prerequisite |
+| 3 | Missing prerequisite, or `--orphan-policy-only` requested with no readable policy |
+
+On exit 3, and on an argument-validation exit 1, no report is written and the
+metrics file is not refreshed.
 
 ## Validation status
 
@@ -131,7 +137,7 @@ Section 9 of the runbook records what was checked, and what still is not. Until
 ## Documentation
 
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — operational guide, rollout procedure,
-  known limitations (French)
+  lab validation findings, known limitations
 
 ## License
 
