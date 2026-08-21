@@ -111,15 +111,25 @@ run() { # renvoie le code retour, laisse les rapports dans $WORK/reports
   PATH="$WORK/bin:$PATH" "$SCRIPT" --cli "$cli" -q -r "$WORK/reports" "$@" >/dev/null 2>&1
 }
 
+latest_report() { # chemin du rapport JSONL le plus recent, piste d'audit exclue
+  local f latest=""
+  for f in "$WORK/reports"/*.jsonl; do
+    if [[ -f "$f" && "${f##*/}" != *audit* ]]; then
+      if [[ -z "$latest" || "$f" -nt "$latest" ]]; then latest="$f"; fi
+    fi
+  done
+  printf '%s\n' "$latest"
+}
+
 decision_of() { # rpc-name -> "DECISION reason"
   local latest
-  latest="$(ls -t "$WORK/reports"/*.jsonl 2>/dev/null | grep -v audit | head -1)"
+  latest="$(latest_report)"
   jq -r --arg n "$1" 'select(.name==$n) | "\(.decision) \(.reason)"' "$latest"
 }
 
 candidates() {
   local latest
-  latest="$(ls -t "$WORK/reports"/*.jsonl 2>/dev/null | grep -v audit | head -1)"
+  latest="$(latest_report)"
   jq -r 'select(.decision=="DELETE") | .name' "$latest" | sort | tr '\n' ' ' | sed 's/ $//'
 }
 
