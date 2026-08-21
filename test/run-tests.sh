@@ -108,6 +108,9 @@ build_mocks() {
   cat > "$WORK/bin/kubectl" <<MOCK
 #!/usr/bin/env bash
 F="$WORK/fixtures"
+# Ligne de commande complete : seule trace permettant de verifier que rien
+# d'autre qu'un RestorePointContent n'est jamais mute (invariant 7).
+echo "\$*" >> "$WORK/calls.log"
 case "\$*" in
   version*)                              echo "Client Version: v1.30.2"; exit 0 ;;
   *"get crd restorepointcontents"*)      exit 0 ;;
@@ -157,7 +160,12 @@ candidates() {
   jq -r 'select(.decision=="DELETE") | .name' "$latest" | sort | tr '\n' ' ' | sed 's/ $//'
 }
 
-reset_reports() { rm -rf "$WORK/reports" "$WORK/deleted.log"; }
+reset_reports() { rm -rf "$WORK/reports" "$WORK/deleted.log" "$WORK/calls.log"; }
+
+mutating_calls() { # appels au CLI portant un verbe mutant
+  grep -aE '(^| )(create|delete|apply|patch|replace|edit|label|annotate) ' \
+    "$WORK/calls.log" 2>/dev/null || true
+}
 
 # --------------------------------- Tests -------------------------------------
 build_fixtures
@@ -290,6 +298,15 @@ reset_reports
 RPC_FIXTURE=rpc_ts_numerique.json run -d 7 && rc=0 || rc=$?
 assert_eq "0" "$rc" "code retour dans les codes documentes"
 assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-ts-numerique)" "horodatage non-string conserve"
+
+head_ "Cas 16 : aucune mutation hors RestorePointContent (invariant 7)"
+reset_reports
+run -d 7 --exclude-namespace protected --max-deletions 100 --apply || true
+assert_eq "5" "$(mutating_calls | wc -l | tr -d ' ')" "5 mutations transmises a l'API"
+assert_eq "0" "$(mutating_calls | grep -cv 'restorepointcontents\.apps\.kio\.kasten\.io' || true)" \
+  "toute mutation cible un RestorePointContent"
+assert_eq "0" "$(mutating_calls | grep -cE ' (restorepoints|policies|retireactions|policies\.config)' || true)" \
+  "ni RestorePoint, ni policy, ni RetireAction mutes"
 
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs\033[0m\n' "$PASS" "$FAIL"
