@@ -79,6 +79,12 @@ warn() { printf '%s [%-5s] %s\n' "$(_ts)" "WARN" "$*" >&2; }
 err()  { printf '%s [%-5s] %s\n' "$(_ts)" "ERROR" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+# Invariant : les codes retour restent 0, 1, 2 ou 3. Sans ce piege, l'echec
+# d'un jq ou d'un utilitaire propage son propre code via 'set -e' (jq sort en
+# 5 sur une erreur de programme). 'set -E' plus haut le fait suivre dans les
+# fonctions et les sous-shells.
+trap 'err "Erreur inattendue (ligne $LINENO)"; exit 1' ERR
+
 usage() {
   cat <<EOF
 $SCRIPT_NAME v$SCRIPT_VERSION - purge des snapshots K10 au-dela d'un seuil d'age
@@ -272,7 +278,9 @@ evaluate() {
     --arg runId "$RUN_ID" \
     '
     def norm_ts:
-      if . == null or . == "" then null
+      # type != "string" couvre null, nombre, booleen, tableau, objet : sub()
+      # leverait une erreur non rattrapable sur ces types.
+      if (type != "string") or . == "" then null
       else (sub("\\.[0-9]+Z$"; "Z") | sub("\\.[0-9]+\\+"; "+")) end;
     def to_epoch:
       norm_ts | if . == null then null

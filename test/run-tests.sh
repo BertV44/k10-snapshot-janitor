@@ -85,6 +85,17 @@ build_fixtures() {
     rpc rpc-ev-export      Bound   prod       mysql      daily-prod  "<empty>" 60  0
   } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_export_vide.json"
 
+  # Horodatage de type non-string : doit donner KEEP, pas un plantage jq dont
+  # le code retour sortirait des codes documentes (invariants 4 et 8).
+  jq -n --arg ts "$(ago 60)" '{apiVersion:"v1",kind:"List",items:[
+    { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
+      metadata:{ name:"rpc-ts-numerique", creationTimestamp:$ts,
+        labels:{ "k10.kasten.io/appName":"mysql",
+                 "k10.kasten.io/appNamespace":"prod" } },
+      status:{ state:"Bound", actionTime:1234567890,
+        logicalSizeBytes:0, physicalSizeBytes:0, restorePointRef:null } }]}' \
+    > "$WORK/fixtures/rpc_ts_numerique.json"
+
   # "gone-policy" est volontairement absente de cette liste
   jq -n '{apiVersion:"v1",kind:"List",items:[
     {metadata:{name:"daily-prod",namespace:"kasten-io"}},
@@ -273,6 +284,12 @@ reset_reports
 run -d 7 --min-keep 0 && rc=0 || rc=$?
 assert_eq "1" "$rc" "--min-keep 0 sort en code 1"
 assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "aucune suppression"
+
+head_ "Cas 15 : horodatage de type non-string (invariants 4 et 8)"
+reset_reports
+RPC_FIXTURE=rpc_ts_numerique.json run -d 7 && rc=0 || rc=$?
+assert_eq "0" "$rc" "code retour dans les codes documentes"
+assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-ts-numerique)" "horodatage non-string conserve"
 
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs\033[0m\n' "$PASS" "$FAIL"
