@@ -204,7 +204,9 @@ check_prereqs() {
   local v
   v="$("$CLI" -n "$K10_NAMESPACE" get deploy -l app=k10 \
         -o jsonpath='{.items[0].spec.template.spec.containers[0].image}' 2>/dev/null || true)"
-  [[ -n "$v" ]] && log "Image K10 detectee : $v"
+  # Un 'if' et non 'cmd && cmd' : en derniere instruction d'une fonction
+  # appelee nue sous 'set -e', un test faux fait sortir tout le script.
+  if [[ -n "$v" ]]; then log "Image K10 detectee : $v"; fi
 }
 
 # ------------------------------- Collecte K10 --------------------------------

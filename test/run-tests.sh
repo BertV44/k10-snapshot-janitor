@@ -102,7 +102,11 @@ MOCK
   # mock refusant les suppressions (simulation d'un RBAC incomplet)
   sed 's#^  \*delete\*).*#  *delete*) echo "Error from server (Forbidden)" >\&2; exit 1 ;;#' \
     "$WORK/bin/kubectl" > "$WORK/bin/kubectl-ro"
-  chmod +x "$WORK/bin/kubectl" "$WORK/bin/kubectl-ro"
+  # mock ou le deploiement K10 est introuvable : label different selon la
+  # version, K10 dans un autre namespace, ou RBAC 'deployments/list' refuse
+  sed 's#^  \*"get deploy"\*).*#  *"get deploy"*) exit 0 ;;#' \
+    "$WORK/bin/kubectl" > "$WORK/bin/kubectl-nok10"
+  chmod +x "$WORK/bin/kubectl" "$WORK/bin/kubectl-ro" "$WORK/bin/kubectl-nok10"
 }
 
 # ------------------------------- Helpers -------------------------------------
@@ -242,6 +246,12 @@ print(cj['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['ar
 else
   printf '  \033[33mSKIP\033[0m python3/pyyaml absent, validation des manifests ignoree\n'
 fi
+
+head_ "Cas 12 : deploiement K10 introuvable"
+reset_reports
+CLI_BIN=kubectl-nok10 run -d 7 --exclude-namespace protected && rc=0 || rc=$?
+assert_eq "0" "$rc" "la detection de l'image K10 est informative, pas bloquante"
+assert_eq "5" "$(candidates | wc -w | tr -d ' ')" "le rapport est produit malgre l'absence de deploiement K10"
 
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs\033[0m\n' "$PASS" "$FAIL"
