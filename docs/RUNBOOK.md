@@ -73,7 +73,7 @@ Le mode conservateur correspond à `CONSERVATIVE_MODE: "true"` dans la ConfigMap
 |---|---|
 | Dry-run par défaut | Aucune suppression sans `--apply`. Le rapport est produit dans tous les cas. |
 | `--min-keep N` | Conserve toujours les N snapshots les plus récents par application (`appNamespace/appName`), même hors seuil. Défaut 1 : aucune application ne peut se retrouver sans aucun point de restauration. |
-| `--max-deletions N` | Abandon immédiat, code retour 2, si le nombre de candidats dépasse N. Défaut 50. Protège d'une erreur de filtre ou d'un label manquant. |
+| `--max-deletions N` | Sous `--apply`, abandon immédiat en code retour 2 si le nombre de candidats dépasse N. Défaut 50. Protège d'une erreur de filtre ou d'un label manquant. En dry-run, le dépassement est signalé dans le résumé et par la métrique `k10_janitor_over_cap`, mais le code retour reste 0 : un rapport d'identification n'est pas un échec. |
 | `--exclude-namespace`, `--exclude-policy`, `--exclude-app` | Exclusions répétables. |
 | `--include-namespace` | Restriction à un périmètre, pour un déploiement progressif. |
 | Label d'exemption | `k10-janitor/exempt=true` sur un `RestorePointContent` le sort définitivement du périmètre. |
@@ -117,7 +117,7 @@ k10_janitor_reclaimable_bytes
 |---|---|
 | 0 | Succès, ou dry-run terminé |
 | 1 | Au moins une suppression en échec, ou erreur d'exécution |
-| 2 | Plafond `--max-deletions` dépassé, aucune suppression effectuée |
+| 2 | Plafond `--max-deletions` dépassé sous `--apply`, aucune suppression effectuée |
 | 3 | Prérequis manquant (`jq`, `oc`/`kubectl`, API injoignable) |
 
 ## 6. Mise en oeuvre
@@ -199,7 +199,7 @@ oc -n kasten-io create configmap k10-snapshot-janitor-script \
 
 Le moteur de décision a été validé hors cluster sur un jeu de 17 `RestorePointContents` simulés couvrant : export récent et export très ancien, snapshot dans le seuil, snapshot hors seuil avec policy active, snapshot dont la policy a été supprimée, snapshot on-demand, snapshot en state `Unbound`, snapshot porteur du label d'exemption, application n'ayant qu'un seul snapshot, horodatage non parsable, namespace exclu, inventaire vide.
 
-Cas de sortie vérifiés : dry-run sans effet de bord, `--apply` avec piste d'audit complète, dépassement de `--max-deletions` avec code 2 et zéro suppression, échec de suppression avec code 1, `--min-keep 2`, `--include-namespace`, `--require-unbound --orphan-policy-only`.
+Cas de sortie vérifiés : dry-run sans effet de bord, `--apply` avec piste d'audit complète, dépassement de `--max-deletions` sous `--apply` avec code 2 et zéro suppression, dépassement en dry-run avec code 0, échec de suppression avec code 1, `--min-keep 2`, `--include-namespace`, `--require-unbound --orphan-policy-only`.
 
 ---
 

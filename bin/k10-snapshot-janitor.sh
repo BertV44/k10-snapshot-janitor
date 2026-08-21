@@ -38,7 +38,7 @@
 #    by a Policy."
 #   Confirmer qu'un restore point n'est plus necessaire avant de le supprimer.
 #
-# Codes retour : 0 succes | 1 erreur | 2 plafond de suppression depasse
+# Codes retour : 0 succes | 1 erreur | 2 plafond de suppression depasse (--apply)
 #                3 prerequis manquant
 # =============================================================================
 
@@ -71,6 +71,7 @@ MIN_KEEP=1                # nb de snapshots les plus recents toujours conserves 
 REQUIRE_UNBOUND=0         # 1 = ne cibler que les RPC dont l'application a disparu
 ORPHAN_POLICY_ONLY=0      # 1 = ne cibler que les RPC sans policy ou dont la policy n'existe plus
 POLICY_COUNT="?"          # nombre de policies K10 lues, "?" si la lecture a echoue
+OVER_CAP=0                # 1 = candidats au-dela de --max-deletions
 INCLUDE_EXPORTS=0         # 1 = inclure aussi les restore points exportes (deconseille)
 WAIT_RETIRE=0             # secondes d'attente de completion des RetireActions
 REPORT_DIR="${REPORT_DIR:-./k10-janitor-reports}"
@@ -119,7 +120,9 @@ GARDE-FOUS
       --apply                Executer reellement les suppressions (sinon dry-run)
       --min-keep N           Toujours conserver les N snapshots les plus recents
                              par application, meme hors retention (defaut: $MIN_KEEP)
-      --max-deletions N      Abandonner si le nombre de candidats depasse N
+      --max-deletions N      Sous --apply, abandonner si le nombre de candidats
+                             depasse N. En dry-run, le depassement est signale
+                             mais le code retour reste 0.
                              (defaut: $MAX_DELETIONS, 0 = illimite)
       --wait-retire SEC      Attendre jusqu'a SEC la completion des RetireActions
       --exempt-label KEY     Cle du label d'exemption (defaut: $LBL_EXEMPT)
@@ -433,6 +436,7 @@ write_reports() {
 summarize() {
   TOTAL=$(wc -l < "$WORKDIR/decisions.jsonl" | tr -d ' ')
   CANDIDATES=$(jq -r 'select(.decision=="DELETE") | .name' "$WORKDIR/decisions.jsonl" | wc -l | tr -d ' ')
+  if [[ "$MAX_DELETIONS" -gt 0 && "$CANDIDATES" -gt "$MAX_DELETIONS" ]]; then OVER_CAP=1; fi
   SNAPSHOTS=$(jq -r 'select(.kind=="snapshot") | .name' "$WORKDIR/decisions.jsonl" | wc -l | tr -d ' ')
   EXPORTS=$(jq -r 'select(.kind=="export") | .name' "$WORKDIR/decisions.jsonl" | wc -l | tr -d ' ')
   RECLAIM_BYTES=$(jq -s '[.[] | select(.decision=="DELETE") | .physicalSizeBytes] | add // 0' "$WORKDIR/decisions.jsonl")
@@ -446,7 +450,7 @@ summarize() {
     echo " seuil retention   : ${RETENTION_DAYS} jours"
     echo " mode              : $([[ $DRY_RUN -eq 1 ]] && echo 'DRY-RUN (aucune suppression)' || echo 'APPLY (suppression reelle)')"
     echo " min-keep          : $MIN_KEEP snapshot(s) recent(s) par application"
-    echo " max-deletions     : $([[ $MAX_DELETIONS -eq 0 ]] && echo 'illimite' || echo "$MAX_DELETIONS")"
+    echo " max-deletions     : $([[ $MAX_DELETIONS -eq 0 ]] && echo 'illimite' || echo "$MAX_DELETIONS")$([[ $OVER_CAP -eq 1 ]] && echo "  (DEPASSE : $CANDIDATES candidats, un --apply serait refuse)" || echo '')"
     echo " require-unbound   : $REQUIRE_UNBOUND"
     echo " orphan-policy-only: $ORPHAN_POLICY_ONLY"
     echo " policies K10 lues : $POLICY_COUNT"
@@ -492,6 +496,9 @@ k10_janitor_restorepointcontents_total $TOTAL
 # HELP k10_janitor_candidates_total Nombre de candidats identifies.
 # TYPE k10_janitor_candidates_total gauge
 k10_janitor_candidates_total $CANDIDATES
+# HELP k10_janitor_over_cap 1 si les candidats depassent --max-deletions.
+# TYPE k10_janitor_over_cap gauge
+k10_janitor_over_cap $OVER_CAP
 # HELP k10_janitor_deleted_total Nombre de suppressions reussies.
 # TYPE k10_janitor_deleted_total gauge
 k10_janitor_deleted_total ${DELETED:-0}
@@ -516,16 +523,23 @@ purge() {
     return 0
   fi
 
-  if [[ "$MAX_DELETIONS" -gt 0 && "$CANDIDATES" -gt "$MAX_DELETIONS" ]]; then
+  # Le plafond est un frein a la suppression : il n'a de sens que la ou une
+  # suppression peut avoir lieu. En dry-run le rapport sort complet, le
+  # depassement est signale, et le code retour reste 0 - sinon le tout premier
+  # run planifie sur un cluster reellement encrasse marque le Job en echec.
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "DRY-RUN : $CANDIDATES RestorePointContents seraient supprimes. Aucune action effectuee."
+    if [[ $OVER_CAP -eq 1 ]]; then
+      warn "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : un --apply serait refuse en l'etat."
+    fi
+    log "Relancer avec --apply pour executer la purge."
+    return 0
+  fi
+
+  if [[ $OVER_CAP -eq 1 ]]; then
     err "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : abandon par securite."
     err "Verifier le rapport, puis relancer avec un plafond adapte si le resultat est attendu."
     return 2
-  fi
-
-  if [[ $DRY_RUN -eq 1 ]]; then
-    log "DRY-RUN : $CANDIDATES RestorePointContents seraient supprimes. Aucune action effectuee."
-    log "Relancer avec --apply pour executer la purge."
-    return 0
   fi
 
   warn "APPLY : suppression de $CANDIDATES RestorePointContents."

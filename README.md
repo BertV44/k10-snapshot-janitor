@@ -63,7 +63,7 @@ Run `--help` for the full option list.
 |---|---|
 | Dry-run default | Nothing is deleted without `--apply` |
 | `--min-keep N` | Always keeps the N most recent snapshots per application |
-| `--max-deletions N` | Aborts with exit code 2 if candidates exceed N, deleting nothing |
+| `--max-deletions N` | Under `--apply`, aborts with exit code 2 if candidates exceed N, deleting nothing. A dry-run reports the overflow and still exits 0 |
 | Exemption label | `k10-janitor/exempt=true` on a `RestorePointContent` excludes it permanently |
 | Exports excluded | Exported restore points are never candidates in normal operation |
 | Unparsable timestamp | Always resolves to `KEEP` |
@@ -98,7 +98,7 @@ cluster is contacted.
 |---|---|
 | 0 | Success, or dry-run completed |
 | 1 | At least one deletion failed, or runtime error |
-| 2 | `--max-deletions` ceiling exceeded, nothing deleted |
+| 2 | `--max-deletions` ceiling exceeded under `--apply`, nothing deleted |
 | 3 | Missing prerequisite |
 
 ## Documentation

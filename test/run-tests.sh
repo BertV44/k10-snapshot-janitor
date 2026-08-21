@@ -335,6 +335,18 @@ reset_reports
 POLICY_FIXTURE=policies_empty.json run -d 7 --exclude-namespace protected && rc=0 || rc=$?
 assert_eq "0" "$rc" "sans le filtre, zero policy reste tolerable"
 
+head_ "Cas 19 : plafond --max-deletions en dry-run (issue #4)"
+reset_reports
+run -d 7 --exclude-namespace protected --max-deletions 3 && rc=0 || rc=$?
+assert_eq "0" "$rc" "un dry-run ne doit pas echouer sur le plafond"
+assert_eq "5" "$(candidates | wc -w | tr -d ' ')" "le rapport liste tous les candidats"
+assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "aucune suppression"
+assert_eq "1" "$(grep -c 'DEPASSE' "$WORK"/reports/*.summary.txt || true)" "le depassement est signale dans le resume"
+# non-regression : le plafond protege toujours en --apply
+reset_reports
+run -d 7 --exclude-namespace protected --max-deletions 3 --apply && rc=0 || rc=$?
+assert_eq "2" "$rc" "le plafond protege toujours en --apply"
+
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs\033[0m\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]] || exit 1
