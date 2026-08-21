@@ -72,6 +72,7 @@ Le mode conservateur correspond à `CONSERVATIVE_MODE: "true"` dans la ConfigMap
 |---|---|
 | Dry-run par défaut | Aucune suppression sans `--apply`. Le rapport est produit dans tous les cas. |
 | `--min-keep N` | Conserve toujours les N snapshots les plus récents par application (`appNamespace/appName`), même hors seuil. Défaut 1 : aucune application ne peut se retrouver sans aucun point de restauration. |
+| `--wait-retire N` | Après un `--apply`, attendre jusqu'à N secondes que les `RetireActions` déclenchées passent en `Complete`. 0 = pas d'attente, valeur par défaut du CronJob. Le dépassement du délai est un avertissement, pas une erreur : sur de gros exports, la réclamation est longue. |
 | `--max-deletions N` | Sous `--apply`, abandon immédiat en code retour 2 si le nombre de candidats dépasse N. Défaut 50. Protège d'une erreur de filtre ou d'un label manquant. En dry-run, le dépassement est signalé dans le résumé et par la métrique `k10_janitor_over_cap`, mais le code retour reste 0 : un rapport d'identification n'est pas un échec. |
 | `--exclude-namespace`, `--exclude-policy`, `--exclude-app` | Exclusions répétables. |
 | `--include-namespace` | Restriction à un périmètre, pour un déploiement progressif. |
@@ -103,6 +104,7 @@ k10_janitor_dry_run
 k10_janitor_retention_days
 k10_janitor_restorepointcontents_total
 k10_janitor_candidates_total
+k10_janitor_over_cap
 k10_janitor_deleted_total
 k10_janitor_failed_total
 k10_janitor_reclaimable_bytes
@@ -117,7 +119,13 @@ k10_janitor_reclaimable_bytes
 | 0 | Succès, ou dry-run terminé |
 | 1 | Au moins une suppression en échec, ou erreur d'exécution |
 | 2 | Plafond `--max-deletions` dépassé sous `--apply`, aucune suppression effectuée |
-| 3 | Prérequis manquant (`jq`, `oc`/`kubectl`, API injoignable) |
+| 3 | Prérequis manquant : `jq`, `oc`/`kubectl` ou API injoignable **ou** `--orphan-policy-only` demandé alors que les policies sont illisibles ou qu'aucune n'a été trouvée dans le namespace K10 |
+
+Sur une sortie 1 de validation d'arguments et sur toutes les sorties 3, aucun
+rapport n'est écrit : l'abandon a lieu avant `write_reports`. Les métriques ne
+sont pas rafraîchies non plus, le fichier `.prom` conserve donc les valeurs du
+run précédent. Surveiller `k10_janitor_last_run_timestamp_seconds` pour
+détecter ces abandons.
 
 ## 6. Mise en oeuvre
 

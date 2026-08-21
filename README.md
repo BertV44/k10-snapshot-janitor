@@ -28,8 +28,10 @@ reports them, and can retire them on a schedule.
   `RetireAction` that does.
 - **Local snapshots only.** Restore points *carrying* the
   `k10.kasten.io/exportProfile` label are treated as exports and are never
-  touched. The discriminator is the presence of the label, not its value:
-  Kubernetes allows an empty label value, and an export is still an export.
+  candidates in normal operation. The discriminator is the presence of the
+  label, not its value: Kubernetes allows an empty label value, and an export
+  is still an export. `--include-exports` lifts that protection; it exists, it
+  is discouraged, and the shipped CronJob never uses it.
 - Does not handle `ClusterRestorePoint` objects, nor orphaned CSI
   `VolumeSnapshot` objects at the storage layer.
 
@@ -41,7 +43,7 @@ reports them, and can retire them on a schedule.
 | Kubernetes | 1.27+ |
 | OpenShift | 4.14+ |
 | CLI | `oc` (auto-detected) or `kubectl` |
-| Tools | `bash` 4+, `jq` 1.6+, coreutils. No `sed`, `awk` or `grep` |
+| Tools | `bash` 4+, `jq` 1.6+, coreutils (`date`, `mktemp`, `rm`, `mkdir`, `wc`, `tr`, `cat`, `cp`, `mv`, `tee`, `sleep`, `basename`). No `sed`, `awk` or `grep` |
 
 ## Quick start
 
@@ -57,7 +59,8 @@ reports them, and can retire them on a schedule.
 ```
 
 `--dry-run` forces report-only mode and overrides an `--apply` placed earlier on
-the command line. Run `--help` for the full option list.
+the command line. `--wait-retire N` waits up to N seconds for the triggered
+`RetireActions` to complete. Run `--help` for the full option list.
 
 ## Safety model
 
