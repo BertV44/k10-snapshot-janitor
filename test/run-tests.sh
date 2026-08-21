@@ -119,6 +119,19 @@ build_fixtures() {
       status:{ state:"Bound", restorePointRef:null } }]}' \
     > "$WORK/fixtures/rpc_sans_ts.json"
 
+  # Horodatages a decalage numerique : fromdateiso8601 de jq n'accepte que le
+  # suffixe Z. Ces objets doivent tomber en KEEP, jamais en DELETE.
+  jq -n '{apiVersion:"v1",kind:"List",items:[
+    { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
+      metadata:{ name:"rpc-offset-plus", creationTimestamp:"2020-01-01T10:00:00+02:00",
+        labels:{ "k10.kasten.io/appName":"a1", "k10.kasten.io/appNamespace":"prod" } },
+      status:{ state:"Bound", actionTime:"2020-01-01T10:00:00+02:00", restorePointRef:null } },
+    { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
+      metadata:{ name:"rpc-offset-moins", creationTimestamp:"2020-01-01T08:00:00-04:00",
+        labels:{ "k10.kasten.io/appName":"a2", "k10.kasten.io/appNamespace":"prod" } },
+      status:{ state:"Bound", actionTime:"2020-01-01T08:00:00.123-04:00", restorePointRef:null } }]}' \
+    > "$WORK/fixtures/rpc_offset.json"
+
   # Horodatage de type non-string : doit donner KEEP, pas un plantage jq dont
   # le code retour sortirait des codes documentes (invariants 4 et 8).
   jq -n --arg ts "$(ago 60)" '{apiVersion:"v1",kind:"List",items:[
@@ -452,6 +465,14 @@ assert_eq "KEEP labelled-exempt" "$(decision_of rpc-ex-2)" "une variable d'envir
 reset_reports
 run -d 7 --exclude-namespace protected --exempt-label autre/cle || true
 assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-ex-2)" "--exempt-label reste la seule surcharge"
+
+head_ "Cas 26 : horodatage a decalage numerique (invariant 4)"
+reset_reports
+RPC_FIXTURE=rpc_offset.json run -d 7 && rc=0 || rc=$?
+assert_eq "0" "$rc" "code retour 0"
+assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-offset-plus)"  "decalage positif conserve"
+assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-offset-moins)" "decalage negatif conserve"
+assert_eq "" "$(candidates)" "aucun candidat"
 
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs, %d ignores\033[0m\n' "$PASS" "$FAIL" "$SKIP"

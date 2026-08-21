@@ -26,9 +26,10 @@ reports them, and can retire them on a schedule.
 - Acts on `RestorePointContent` only. Deleting a `RestorePoint` does not release
   the underlying artifacts; deleting a `RestorePointContent` triggers a
   `RetireAction` that does.
-- **Local snapshots only.** Restore points carrying the
+- **Local snapshots only.** Restore points *carrying* the
   `k10.kasten.io/exportProfile` label are treated as exports and are never
-  touched.
+  touched. The discriminator is the presence of the label, not its value:
+  Kubernetes allows an empty label value, and an export is still an export.
 - Does not handle `ClusterRestorePoint` objects, nor orphaned CSI
   `VolumeSnapshot` objects at the storage layer.
 
@@ -55,7 +56,8 @@ reports them, and can retire them on a schedule.
   --report-dir ./reports --apply
 ```
 
-Run `--help` for the full option list.
+`--dry-run` forces report-only mode and overrides an `--apply` placed earlier on
+the command line. Run `--help` for the full option list.
 
 ## Safety model
 
@@ -66,7 +68,11 @@ Run `--help` for the full option list.
 | `--max-deletions N` | Under `--apply`, aborts with exit code 2 if candidates exceed N, deleting nothing. A dry-run reports the overflow and still exits 0 |
 | Exemption label | `k10-janitor/exempt=true` on a `RestorePointContent` excludes it permanently |
 | Exports excluded | Exported restore points are never candidates in normal operation |
-| Unparsable timestamp | Always resolves to `KEEP` |
+| Unparsable timestamp | Always resolves to `KEEP`, including a numeric offset such as `+02:00`, or a value that is not a string at all |
+| `--min-keep 0` | Rejected outright with exit 1: no application may be left without a restore point |
+| Missing policy data | If `--orphan-policy-only` is requested and the policy list is unreadable or empty, the run aborts with exit 3 rather than dropping the filter |
+| Exemption key | Settable only through `--exempt-label`, never from the environment, so a ConfigMap key cannot silently void every exemption |
+| Nothing else is mutated | The only write the script performs is deleting a `RestorePointContent`. Asserted by the test suite on the full CLI command line |
 
 Every run writes a CSV, a JSONL and a summary per `run_id`, plus a separate
 audit trail when `--apply` is used. Each decision carries an explicit reason.
@@ -89,8 +95,15 @@ procedure.
 ./test/run-tests.sh
 ```
 
-Runs entirely offline: fixtures and a stub CLI are generated on the fly, no
-cluster is contacted.
+83 assertions, entirely offline: fixtures and a stub CLI are generated on the
+fly, no cluster is contacted. A skipped case is fatal — a suite that quietly
+runs at 97% is worse than one that fails, so `python3` and `pyyaml` are
+required for the manifest checks.
+
+Guards that matter are verified by mutation, not just by passing: breaking the
+export discriminator, the age comparison, the resource targeted by the delete
+call, or the globbing protection in the CronJob each make a specific assertion
+fail.
 
 ## Exit codes
 
@@ -100,6 +113,17 @@ cluster is contacted.
 | 1 | At least one deletion failed, or runtime error |
 | 2 | `--max-deletions` ceiling exceeded under `--apply`, nothing deleted |
 | 3 | Missing prerequisite |
+
+## Validation status
+
+| | |
+|---|---|
+| Kasten 9.0.3 | **Verified in a lab.** The `exportProfile` discriminator behaves as assumed, and a control dry-run classified a real inventory exactly as the labels dictate |
+| Kasten 8.5.x | **Not verified.** Nothing from the 9.0.3 run transfers |
+| Reclaimable bytes | **Not verified.** `status.physicalSizeBytes` was absent from every object of the validation cluster, which held no volume-backed restore points, so the figure reported 0 |
+
+Section 9 of the runbook records what was checked, and what still is not. Until
+8.5.x is covered, treat `--apply` on that version as unvalidated.
 
 ## Documentation
 

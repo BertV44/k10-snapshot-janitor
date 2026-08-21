@@ -346,7 +346,14 @@ evaluate() {
       # type != "string" couvre null, nombre, booleen, tableau, objet : sub()
       # leverait une erreur non rattrapable sur ces types.
       if (type != "string") or . == "" then null
-      else (sub("\\.[0-9]+Z$"; "Z") | sub("\\.[0-9]+\\+"; "+")) end;
+      # fromdateiso8601 de jq accepte uniquement le suffixe Z. On retire donc
+      # les fractions de seconde avant un Z, et rien de plus : un horodatage
+      # porteur de decalage numerique (+02:00, -04:00) reste non parsable et
+      # tombe en KEEP timestamp-unparseable. Choix delibere : convertir le
+      # decalage a la main risquerait de vieillir un objet, donc de le
+      # supprimer. Verifie sur K10 9.0.3 : tous les horodatages sont en Z.
+      # NB : pas d apostrophe dans ce bloc, il vit dans une chaine simple-quotee.
+      else sub("\\.[0-9]+Z$"; "Z") end;
     def to_epoch:
       norm_ts | if . == null then null
       else (try fromdateiso8601 catch null) end;

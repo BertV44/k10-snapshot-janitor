@@ -15,8 +15,10 @@
 #   oc -n kasten-io start-build k10-snapshot-janitor --from-dir=. --follow
 #   -> image-registry.openshift-image-registry.svc:5000/kasten-io/k10-snapshot-janitor:latest
 #
-# Alternative sans build : docker.io/alpine/k8s:1.30.2 embarque kubectl + jq.
-# Dans ce cas, ajouter --cli kubectl aux arguments du CronJob.
+# Alternative sans build : une image communautaire embarquant kubectl + jq
+# convient aussi. La documentation de ce projet utilise "oc" partout ; si
+# l'image retenue ne fournit que kubectl, le script le detecte seul, et
+# "--cli kubectl" ne sert qu'a forcer le choix.
 # =============================================================================
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 

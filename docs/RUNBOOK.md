@@ -86,7 +86,7 @@ oc label restorepointcontents.apps.kio.kasten.io <nom> k10-janitor/exempt=true
 
 ## 4. Rapports et audit
 
-Chaque exécution écrit dans `--report-dir` trois fichiers horodatés par `run_id` :
+Chaque exécution écrit dans `--report-dir` quatre fichiers horodatés, le dernier uniquement sous `--apply` par `run_id` :
 
 - `k10-janitor-<run_id>.csv` : une ligne par `RestorePointContent` inventorié, avec `decision`, `reason`, âge, application, policy, tailles, rang
 - `k10-janitor-<run_id>.jsonl` : même contenu en JSON Lines, exploitable par `jq` ou une ingestion SIEM
