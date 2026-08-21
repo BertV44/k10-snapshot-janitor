@@ -100,6 +100,11 @@ build_fixtures() {
   jq -n '{apiVersion:"v1",kind:"List",items:[
     {metadata:{name:"daily-prod",namespace:"kasten-io"}},
     {metadata:{name:"weekly-dev",namespace:"kasten-io"}}]}' > "$WORK/fixtures/policies.json"
+
+  # Liste vide : atteignable avec un --k10-namespace errone, le CRD des
+  # RestorePointContent etant cluster-scoped, la requete namespacee reussit
+  # alors avec zero resultat.
+  jq -n '{apiVersion:"v1",kind:"List",items:[]}' > "$WORK/fixtures/policies_empty.json"
 }
 
 build_mocks() {
@@ -115,7 +120,7 @@ case "\$*" in
   version*)                              echo "Client Version: v1.30.2"; exit 0 ;;
   *"get crd restorepointcontents"*)      exit 0 ;;
   *"get restorepointcontents"*)          cat "\$F/\${RPC_FIXTURE:-rpc.json}"; exit 0 ;;
-  *"get policies.config.kio.kasten.io"*) cat "\$F/policies.json"; exit 0 ;;
+  *"get policies.config.kio.kasten.io"*) cat "\$F/\${POLICY_FIXTURE:-policies.json}"; exit 0 ;;
   *"get retireactions"*)                 jq -n '{items:[]}'; exit 0 ;;
   *"get deploy"*)                        echo "gcr.io/kasten-images/k10:8.5.9"; exit 0 ;;
   *delete*)                              echo "\$(date -u +%FT%TZ) DELETE \${*: -2:1}" >> "$WORK/deleted.log"; exit 0 ;;
@@ -129,7 +134,11 @@ MOCK
   # version, K10 dans un autre namespace, ou RBAC 'deployments/list' refuse
   sed 's#^  \*"get deploy"\*).*#  *"get deploy"*) exit 0 ;;#' \
     "$WORK/bin/kubectl" > "$WORK/bin/kubectl-nok10"
-  chmod +x "$WORK/bin/kubectl" "$WORK/bin/kubectl-ro" "$WORK/bin/kubectl-nok10"
+  # mock dont la lecture des policies echoue : droit RBAC 'list' manquant
+  sed 's#^  \*"get policies.*#  *"get policies"*) exit 1 ;;#' \
+    "$WORK/bin/kubectl" > "$WORK/bin/kubectl-nopolicies"
+  chmod +x "$WORK/bin/kubectl" "$WORK/bin/kubectl-ro" \
+           "$WORK/bin/kubectl-nok10" "$WORK/bin/kubectl-nopolicies"
 }
 
 # ------------------------------- Helpers -------------------------------------
@@ -307,6 +316,24 @@ assert_eq "0" "$(mutating_calls | grep -cv 'restorepointcontents\.apps\.kio\.kas
   "toute mutation cible un RestorePointContent"
 assert_eq "0" "$(mutating_calls | grep -cE ' (restorepoints|policies|retireactions|policies\.config)' || true)" \
   "ni RestorePoint, ni policy, ni RetireAction mutes"
+
+head_ "Cas 17 : --orphan-policy-only avec des policies illisibles (issue #3)"
+reset_reports
+CLI_BIN=kubectl-nopolicies run -d 7 --orphan-policy-only && rc=0 || rc=$?
+assert_eq "3" "$rc" "abandon en code 3, le filtre restrictif ne doit pas etre retire"
+assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "aucune suppression"
+reset_reports
+CLI_BIN=kubectl-nopolicies run -d 7 --exclude-namespace protected && rc=0 || rc=$?
+assert_eq "0" "$rc" "sans le filtre, des policies illisibles restent tolerables"
+
+head_ "Cas 18 : --orphan-policy-only avec zero policy (issue #3)"
+reset_reports
+POLICY_FIXTURE=policies_empty.json run -d 7 --orphan-policy-only && rc=0 || rc=$?
+assert_eq "3" "$rc" "abandon en code 3, sans policy de reference tout parait orphelin"
+assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "aucune suppression"
+reset_reports
+POLICY_FIXTURE=policies_empty.json run -d 7 --exclude-namespace protected && rc=0 || rc=$?
+assert_eq "0" "$rc" "sans le filtre, zero policy reste tolerable"
 
 # --------------------------------- Bilan -------------------------------------
 printf '\n\033[1mBilan : %d reussis, %d echecs\033[0m\n' "$PASS" "$FAIL"

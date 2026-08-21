@@ -70,6 +70,7 @@ MAX_DELETIONS=50          # 0 = illimite
 MIN_KEEP=1                # nb de snapshots les plus recents toujours conserves par application
 REQUIRE_UNBOUND=0         # 1 = ne cibler que les RPC dont l'application a disparu
 ORPHAN_POLICY_ONLY=0      # 1 = ne cibler que les RPC sans policy ou dont la policy n'existe plus
+POLICY_COUNT="?"          # nombre de policies K10 lues, "?" si la lecture a echoue
 INCLUDE_EXPORTS=0         # 1 = inclure aussi les restore points exportes (deconseille)
 WAIT_RETIRE=0             # secondes d'attente de completion des RetireActions
 REPORT_DIR="${REPORT_DIR:-./k10-janitor-reports}"
@@ -250,11 +251,27 @@ fetch_data() {
   log "Collecte des policies K10 dans '$K10_NAMESPACE'..."
   if "$CLI" -n "$K10_NAMESPACE" get "$POLICY_CRD" -o json > "$WORKDIR/policies.json" 2>/dev/null; then
     jq '[.items[].metadata.name]' "$WORKDIR/policies.json" > "$WORKDIR/policy_names.json"
-    log "$(jq 'length' "$WORKDIR/policy_names.json") policies actives"
+    POLICY_COUNT="$(jq 'length' "$WORKDIR/policy_names.json")"
+    log "$POLICY_COUNT policies actives"
+    # Zero policy rend --orphan-policy-only inoperant : plus aucune policy de
+    # reference, donc tout snapshot parait orphelin. Cas atteignable avec un
+    # --k10-namespace errone, le CRD des RPC etant cluster-scoped : la requete
+    # namespacee reussit alors avec zero resultat.
+    if [[ $ORPHAN_POLICY_ONLY -eq 1 && "$POLICY_COUNT" -eq 0 ]]; then
+      err "--orphan-policy-only demande, mais aucune policy trouvee dans '$K10_NAMESPACE'."
+      err "Sans policy de reference, tout snapshot serait vu comme orphelin. Verifier --k10-namespace."
+      exit 3
+    fi
   else
-    warn "Policies illisibles - --orphan-policy-only sera desactive"
     echo 'null' > "$WORKDIR/policy_names.json"
-    ORPHAN_POLICY_ONLY=0
+    # Le filtre est restrictif : le retirer elargirait le perimetre de
+    # suppression. On abandonne plutot que de degrader en silence.
+    if [[ $ORPHAN_POLICY_ONLY -eq 1 ]]; then
+      err "--orphan-policy-only demande, mais les policies sont illisibles dans '$K10_NAMESPACE'."
+      err "Refus de poursuivre sans le filtre : verifier le droit RBAC 'list' sur $POLICY_CRD."
+      exit 3
+    fi
+    warn "Policies illisibles - le filtre d'orphelinage par policy est indisponible"
   fi
 }
 
@@ -432,6 +449,7 @@ summarize() {
     echo " max-deletions     : $([[ $MAX_DELETIONS -eq 0 ]] && echo 'illimite' || echo "$MAX_DELETIONS")"
     echo " require-unbound   : $REQUIRE_UNBOUND"
     echo " orphan-policy-only: $ORPHAN_POLICY_ONLY"
+    echo " policies K10 lues : $POLICY_COUNT"
     echo "--------------------------------------------------------------"
     echo " RestorePointContents inventories : $TOTAL"
     echo "   dont snapshots locaux          : $SNAPSHOTS"
