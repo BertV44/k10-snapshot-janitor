@@ -36,7 +36,9 @@ LABEL name="k10-snapshot-janitor" \
       summary="Purge des snapshots Veeam Kasten au-dela d'un seuil d'age" \
       maintainer="TAM EMEA"
 
-RUN microdnf -y install bash jq tar gzip ca-certificates shadow-utils \
+# coreutils-single est explicite plutot que suppose : le script appelle date,
+# mktemp, wc, tr, cat, cp, mv, tee, sleep et basename.
+RUN microdnf -y install bash jq coreutils-single tar gzip ca-certificates shadow-utils \
     && microdnf -y clean all \
     && rm -rf /var/cache/yum
 

@@ -40,7 +40,7 @@ reports them, and can retire them on a schedule.
 | Kubernetes | 1.27+ |
 | OpenShift | 4.14+ |
 | CLI | `oc` (auto-detected) or `kubectl` |
-| Tools | `bash` 4+, `jq` 1.6+ |
+| Tools | `bash` 4+, `jq` 1.6+, coreutils. No `sed`, `awk` or `grep` |
 
 ## Quick start
 

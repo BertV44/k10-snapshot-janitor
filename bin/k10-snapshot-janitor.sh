@@ -17,7 +17,10 @@
 #
 # Cible produit  : Veeam Kasten 8.5.x / 9.0.x  (CRD apps.kio.kasten.io/v1alpha1)
 # Plateformes    : OpenShift 4.x (oc) et Kubernetes vanilla (kubectl)
-# Dependances    : oc ou kubectl, jq >= 1.6, GNU coreutils (date)
+# Dependances    : oc ou kubectl, jq >= 1.6, bash >= 4, coreutils
+#                  (date, mktemp, wc, tr, cat, cp, mv, tee, sleep, basename).
+#                  Ni sed, ni awk, ni grep : toute mise en forme passe par jq.
+#                  Aucune syntaxe GNU specifique, le script tourne aussi sur BSD.
 #
 # MODELE DE DONNEES (documente, docs.kasten.io/latest/api/restorepoints) :
 #   - RestorePoint         : namespace de l'application, apps.kio.kasten.io/v1alpha1
@@ -475,8 +478,14 @@ summarize() {
     echo " Taille physique candidate        : $RECLAIM_BYTES octets"
     echo "--------------------------------------------------------------"
     echo " Repartition des decisions KEEP :"
-    jq -r 'select(.decision=="KEEP") | .reason' "$WORKDIR/decisions.jsonl" \
-      | sort | uniq -c | sort -rn | sed 's/^/   /'
+    # Agrege en jq plutot que par 'sort | uniq -c | sort -rn | sed' : cela
+    # retire sed, seul binaire du script hors bash, jq, oc/kubectl et coreutils.
+    jq -rs '
+      def lpad($n): tostring | if ($n - length) > 0
+                               then (" " * ($n - length)) + . else . end;
+      [ .[] | select(.decision=="KEEP") | .reason ]
+      | group_by(.) | map({reason: .[0], n: length}) | sort_by(-.n)
+      | .[] | "   \(.n | lpad(4)) \(.reason)"' "$WORKDIR/decisions.jsonl"
     echo "--------------------------------------------------------------"
     if [[ "$CANDIDATES" -gt 0 ]]; then
       echo " Candidats (age_days | namespace/app | policy | rpc) :"
