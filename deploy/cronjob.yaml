@@ -122,6 +122,11 @@ data:
   EXCLUDE_NAMESPACES: ""
   # Policies a exclure, separees par des espaces
   EXCLUDE_POLICIES: ""
+  # Applications a exclure, separees par des espaces
+  EXCLUDE_APPS: ""
+  # Restreindre le perimetre a ces namespaces uniquement, separes par des
+  # espaces. Vide = tout le cluster.
+  INCLUDE_NAMESPACES: ""
   # Attente de completion des RetireActions, en secondes (0 = pas d'attente)
   WAIT_RETIRE: "0"
   K10_NAMESPACE: "kasten-io"
@@ -216,8 +221,17 @@ spec:
                     ARGS+=( --require-unbound --orphan-policy-only )
                   fi
 
-                  for ns in ${EXCLUDE_NAMESPACES}; do ARGS+=( --exclude-namespace "$ns" ); done
-                  for po in ${EXCLUDE_POLICIES};   do ARGS+=( --exclude-policy   "$po" ); done
+                  # set -f : le decoupage en mots est voulu, le globbing non.
+                  # Sans lui, EXCLUDE_NAMESPACES="prod-*" serait developpe
+                  # contre le repertoire courant du conteneur.
+                  # Les ':-' evitent qu'une ConfigMap anterieure a ces cles ne
+                  # fasse echouer le Job sous 'set -u'.
+                  set -f
+                  for ns  in ${EXCLUDE_NAMESPACES:-};  do ARGS+=( --exclude-namespace "$ns" );  done
+                  for po  in ${EXCLUDE_POLICIES:-};    do ARGS+=( --exclude-policy    "$po" );  done
+                  for ap  in ${EXCLUDE_APPS:-};        do ARGS+=( --exclude-app       "$ap" );  done
+                  for ins in ${INCLUDE_NAMESPACES:-};  do ARGS+=( --include-namespace "$ins" ); done
+                  set +f
 
                   echo "Commande : k10-snapshot-janitor.sh ${ARGS[*]}"
                   exec /opt/janitor/k10-snapshot-janitor.sh "${ARGS[@]}"

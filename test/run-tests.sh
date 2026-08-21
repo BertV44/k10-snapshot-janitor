@@ -314,6 +314,28 @@ print(cj['spec']['jobTemplate']['spec']['template']['spec']['containers'][0]['ar
         bash "$WORK/args.sh" >/dev/null 2>&1 || allok=0
   done; done
   assert_eq "1" "$allok" "construction des arguments du CronJob sur les 4 combinaisons"
+
+  # Le decoupage en mots est voulu, le globbing non. Un glob ne se developpe
+  # que s'il matche : on cree donc des fichiers qui matchent.
+  # On retire aussi la ligne 'echo "Commande : ..."', qui imprimerait les
+  # memes arguments une seconde fois.
+  printf '%s\n' "$args" \
+    | sed -e 's#^ *echo "Commande.*##' \
+          -e 's#^ *exec /opt/janitor/.*#printf "%s\\n" "${ARGS[@]}"#' > "$WORK/args-echo.sh"
+  mkdir -p "$WORK/globtest"; : > "$WORK/globtest/prod-a"; : > "$WORK/globtest/prod-b"
+  built="$(cd "$WORK/globtest" && env RETENTION_DAYS=7 K10_NAMESPACE=kasten-io \
+      MIN_KEEP=1 MAX_DELETIONS=50 WAIT_RETIRE=0 PURGE_APPLY=false \
+      CONSERVATIVE_MODE=false EXCLUDE_NAMESPACES='prod-*' EXCLUDE_APPS='payments' \
+      INCLUDE_NAMESPACES='dev' \
+      bash "$WORK/args-echo.sh" 2>/dev/null | tr '\n' ' ')"
+  assert_eq "1" "$(printf '%s' "$built" | jq -Rr '[splits(" ")] | map(select(. == "prod-*")) | length')" \
+    "le namespace exclu reste litteral, sans expansion glob"
+  assert_eq "0" "$(printf '%s' "$built" | jq -Rr '[splits(" ")] | map(select(. == "prod-a" or . == "prod-b")) | length')" \
+    "aucun nom de fichier du repertoire courant ne s'est glisse dans les arguments"
+  assert_eq "1" "$(printf '%s' "$built" | jq -Rr '[splits(" ")] | map(select(. == "--exclude-app")) | length')" \
+    "EXCLUDE_APPS cable sur --exclude-app"
+  assert_eq "1" "$(printf '%s' "$built" | jq -Rr '[splits(" ")] | map(select(. == "--include-namespace")) | length')" \
+    "INCLUDE_NAMESPACES cable sur --include-namespace"
 else
   skip "python3/pyyaml absent, validation des manifests ignoree"
 fi
