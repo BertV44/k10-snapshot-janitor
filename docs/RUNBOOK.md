@@ -55,7 +55,19 @@ A snapshot older than X days is **not** necessarily an orphan. A legitimate GFS 
 
 ### The native mechanism, for reference
 
-[available] The K10 Garbage Collector already cleans up the `RestorePointContents` of manual backups whose `spec.expiresAt` has passed (settable through the API or the manual snapshot page in the UI). This script covers what the GC does not: snapshots with no `expiresAt`, those from deleted policies, and those of applications removed from the cluster.
+[available] The K10 Garbage Collector already cleans up the `RestorePointContents` of manual backups whose `spec.expiresAt` has **passed** (settable through the API or the manual snapshot page in the UI).
+
+`spec.expiresAt` can take three shapes, and only one of them is ever collected:
+
+| Value | Collected by the GC |
+|---|---|
+| absent, or `N/A` | no, nothing to expire against |
+| a date | yes, once the date has passed |
+| `No Expiration` | no, retention is explicitly unlimited |
+
+This script covers what the GC does not: restore points the GC will never reclaim because no expiry is set or because it is explicitly `No Expiration`, those from deleted policies, and those of applications removed from the cluster.
+
+The script does not read `spec.expiresAt` today. If it ever does, the safe rule is the one already applied to timestamps: **anything that is not a parsable date resolves to `KEEP`**. A naive date parse breaks on two of the three shapes.
 
 ---
 

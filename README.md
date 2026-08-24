@@ -14,7 +14,7 @@ and optionally retires them. Dry-run by default.
 Kasten retires restore points through policy retention. Restore points that no
 policy retains are never cleaned up automatically:
 
-- on-demand snapshots taken without an `expiresAt` value
+- on-demand snapshots the garbage collector will never reclaim, because `spec.expiresAt` is unset or explicitly `No Expiration`
 - snapshots whose originating policy has since been deleted
 - snapshots of applications or namespaces that no longer exist in the cluster
 
