@@ -386,16 +386,23 @@ evaluate() {
             actionTime:    (.status.actionTime // null),
             scheduledTime: (.status.scheduledTime // null),
             created:       .metadata.creationTimestamp,
+            # Absent, null, non-numeric and negative all count as "unknown",
+            # never as a real zero. Keeping a string out of the sum also
+            # matters because jq add concatenates strings instead of failing.
+            hasLogicalSize:
+              ((.status.logicalSizeBytes | type) == "number"
+               and .status.logicalSizeBytes >= 0),
+            hasPhysicalSize:
+              ((.status.physicalSizeBytes | type) == "number"
+               and .status.physicalSizeBytes >= 0),
             logicalSizeBytes:
               (if (.status.logicalSizeBytes | type) == "number"
+                  and .status.logicalSizeBytes >= 0
                then .status.logicalSizeBytes else 0 end),
             physicalSizeBytes:
               (if (.status.physicalSizeBytes | type) == "number"
-               then .status.physicalSizeBytes else 0 end),
-            # Absent, null or non-numeric are all "unknown", never a real zero.
-            # This also keeps a string value out of the sum, where jq add would
-            # concatenate instead of failing.
-            hasPhysicalSize: ((.status.physicalSizeBytes | type) == "number")
+                  and .status.physicalSizeBytes >= 0
+               then .status.physicalSizeBytes else 0 end)
           }
         # reference timestamp: actionTime > scheduledTime > creationTimestamp
         | .refTime = (.actionTime // .scheduledTime // .created)
@@ -475,7 +482,8 @@ write_reports() {
         .runId, .decision, .reason, .name, .state, .appNamespace, .appName, .appType,
         .policyName, (.policyExists|tostring), (.onDemand|tostring), .kind,
         (.refTime // ""), ((.ageDays // "")|tostring), (.rank|tostring),
-        (.logicalSizeBytes|tostring), (.physicalSizeBytes|tostring),
+        (if .hasLogicalSize  then (.logicalSizeBytes|tostring)  else "" end),
+        (if .hasPhysicalSize then (.physicalSizeBytes|tostring) else "" end),
         (if .rpNamespace == "" then "" else .rpNamespace + "/" + .rpName end)
       ] | @csv' "$WORKDIR/decisions.jsonl"
   } > "$REPORT_CSV"

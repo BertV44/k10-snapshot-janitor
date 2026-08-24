@@ -149,7 +149,11 @@ build_fixtures() {
       rp("rpc-sized-recent";   "sized";   $a; 1000),
       rp("rpc-sized-old";      "sized";   $b; 1000),
       rp("rpc-unsized-recent"; "unsized"; $a; null),
-      rp("rpc-unsized-old";    "unsized"; $b; null)]}' \
+      rp("rpc-unsized-old";    "unsized"; $b; null),
+      rp("rpc-strsize-recent"; "strsize"; $a; "4852012"),
+      rp("rpc-strsize-old";    "strsize"; $b; "4852012")]}
+    | .items |= map(if .metadata.name == "rpc-strsize-old"
+                    then .status.logicalSizeBytes = "17179869184" else . end)' \
     > "$WORK/fixtures/rpc_sizes.json"
 
   # Non-string timestamp: must yield KEEP, not a jq crash whose exit code
@@ -242,6 +246,23 @@ candidates() {
 }
 
 reset_reports() { rm -rf "$WORK/reports" "$WORK/deleted.log" "$WORK/calls.log"; }
+
+csv_field() { # rpc-name column-name -> value, read from the latest CSV report
+  local f col
+  f="$(latest_report)"; f="${f%.jsonl}.csv"
+  col="$2"
+  jq -Rr --arg n "$1" --arg c "$col" '
+    [splits(",")] as $row
+    | if (input_line_number == 1) then ($row | index("\($c)")) as $i | "IDX \($i)" else empty end' \
+    "$f" >/dev/null 2>&1 || true
+  python3 -c "
+import csv, sys
+with open(sys.argv[1], newline='') as fh:
+    for row in csv.DictReader(fh):
+        if row['rpc_name'] == sys.argv[2]:
+            print(row[sys.argv[3]]); break
+" "$f" "$1" "$col"
+}
 
 mutating_calls() { # CLI calls carrying a mutating verb
   grep -aE '(^| )(create|delete|apply|patch|replace|edit|label|annotate) ' \
@@ -525,11 +546,21 @@ head_ "Case 30: candidate size, unknown is not zero (issue #16)"
 reset_reports
 rm -f "$WORK/sizes.prom"
 RPC_FIXTURE=rpc_sizes.json run -d 7 --metrics-file "$WORK/sizes.prom" || true
-assert_eq "rpc-sized-old rpc-unsized-old" "$(candidates)" "one candidate per application"
+assert_eq "rpc-sized-old rpc-strsize-old rpc-unsized-old" "$(candidates)" "one candidate per application"
 assert_eq "1000" "$(awk '/^k10_janitor_candidate_physical_bytes /{print $2}' "$WORK/sizes.prom" 2>/dev/null)" \
-  "only the sizes actually reported are summed"
-assert_eq "1" "$(awk '/^k10_janitor_candidate_size_unknown_total /{print $2}' "$WORK/sizes.prom" 2>/dev/null)" \
-  "the candidate with no size is counted as unknown"
+  "a non-numeric size is left out of the sum, not concatenated into it"
+assert_eq "2" "$(awk '/^k10_janitor_candidate_size_unknown_total /{print $2}' "$WORK/sizes.prom" 2>/dev/null)" \
+  "absent and non-numeric both count as unknown"
+# the CSV must not turn an unknown size into a zero
+assert_eq "" "$(csv_field rpc-strsize-old physical_bytes)" "a non-numeric physical size reaches the CSV empty, not as 0"
+assert_eq "" "$(csv_field rpc-strsize-old logical_bytes)"  "same for a non-numeric logical size"
+assert_eq "1000" "$(csv_field rpc-sized-old physical_bytes)" "a real size still reaches the CSV"
+# The JSONL is consumed by jq and SIEM ingests: its size fields must always be
+# numbers, whatever type the API returned. This is what the value typing buys,
+# the hasSize guards alone would not keep a string out of the report.
+assert_eq "0" "$(jq -s '[.[] | select((.physicalSizeBytes|type) != "number"
+                                      or (.logicalSizeBytes|type) != "number")] | length' \
+  "$(latest_report)")" "the JSONL size fields are always numbers"
 assert_eq "0" "$(grep -c 'k10_janitor_reclaimable_bytes' "$WORK/sizes.prom" 2>/dev/null || true)" \
   "the old metric name is gone"
 assert_eq "1" "$(grep -c 'unknown size' "$WORK"/reports/*.summary.txt || true)" \

@@ -14,7 +14,7 @@ and optionally retires them. Dry-run by default.
 Kasten retires restore points through policy retention. Restore points that no
 policy retains are never cleaned up automatically:
 
-- on-demand snapshots the garbage collector will never reclaim, because `spec.expiresAt` is unset or explicitly `No Expiration`
+- on-demand snapshots the garbage collector will never reclaim, because no expiry is set or because retention is explicitly unlimited
 - snapshots whose originating policy has since been deleted
 - snapshots of applications or namespaces that no longer exist in the cluster
 
@@ -101,15 +101,15 @@ procedure.
 ./test/run-tests.sh
 ```
 
-91 assertions, entirely offline: fixtures and a stub CLI are generated on the
+101 assertions, entirely offline: fixtures and a stub CLI are generated on the
 fly, no cluster is contacted. A skipped case is fatal — a suite that quietly
 runs at 97% is worse than one that fails, so `python3` and `pyyaml` are
 required for the manifest checks.
 
 Guards that matter are verified by mutation, not just by passing: breaking the
 export discriminator, the age comparison, the resource targeted by the delete
-call, or the globbing protection in the CronJob each make a specific assertion
-fail.
+call, the globbing protection in the CronJob, or the typing of the reported
+sizes each make a specific assertion fail.
 
 ## Exit codes
 

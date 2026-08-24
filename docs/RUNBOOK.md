@@ -57,17 +57,28 @@ A snapshot older than X days is **not** necessarily an orphan. A legitimate GFS 
 
 [available] The K10 Garbage Collector already cleans up the `RestorePointContents` of manual backups whose `spec.expiresAt` has **passed** (settable through the API or the manual snapshot page in the UI).
 
-`spec.expiresAt` can take three shapes, and only one of them is ever collected:
+**[unverified]** A restore point presents three distinct expiry states, and only one of them is ever collected:
 
-| Value | Collected by the GC |
+| State | Collected by the GC |
 |---|---|
-| absent, or `N/A` | no, nothing to expire against |
-| a date | yes, once the date has passed |
-| `No Expiration` | no, retention is explicitly unlimited |
+| no expiry set, shown as `N/A` | no, there is nothing to expire against |
+| an expiry date | yes, once the date has passed |
+| unlimited retention, shown as `No Expiration` | no, it is explicitly kept forever |
 
-This script covers what the GC does not: restore points the GC will never reclaim because no expiry is set or because it is explicitly `No Expiration`, those from deleted policies, and those of applications removed from the cluster.
+`N/A` and `No Expiration` are what the restore point *displays*. Whether
+`spec.expiresAt` literally carries those strings, or is simply absent in both
+cases, has not been checked against the CRD schema — a field typed as a
+timestamp could not hold them. [validate in a lab] before relying on the exact
+API representation.
 
-The script does not read `spec.expiresAt` today. If it ever does, the safe rule is the one already applied to timestamps: **anything that is not a parsable date resolves to `KEEP`**. A naive date parse breaks on two of the three shapes.
+This script covers what the GC does not: restore points it will never reclaim
+because no expiry is set or because retention is explicitly unlimited, those
+from deleted policies, and those of applications removed from the cluster.
+
+The script does not read `spec.expiresAt` today. If it ever does, the safe rule
+is the one already applied to timestamps: **anything that is not a parsable
+date resolves to `KEEP`**. That holds whichever representation turns out to be
+the real one.
 
 ---
 
