@@ -111,9 +111,10 @@ k10_janitor_retention_days
 k10_janitor_restorepointcontents_total
 k10_janitor_candidates_total
 k10_janitor_over_cap
+k10_janitor_candidate_physical_bytes
+k10_janitor_candidate_size_unknown_total
 k10_janitor_deleted_total
 k10_janitor_failed_total
-k10_janitor_reclaimable_bytes
 ```
 
 [unverified] The textfile collector is not directly usable from a CronJob pod without node-exporter mounted on the same volume. For a Grafana dashboard, the simplest options are a Pushgateway or a sidecar scraping the PVC. To be decided against the customer monitoring stack.
@@ -202,7 +203,10 @@ oc -n kasten-io create configmap k10-snapshot-janitor-script \
 
 ## 8. Known limitations
 
-- Space reclamation is neither immediate nor proportional. [available] Deduplication, data shared between restore points, version retention for immutable backups and safety windows can all delay or cancel the gain. The `reclaimable_bytes` field of the report is an indicative upper bound based on `status.physicalSizeBytes`. **[unverified]** that field was absent from the entire inventory of the validation cluster, where the script therefore reports 0: see section 9.
+- **The reported candidate size is not a promise of reclaimable space.** The script sums `status.physicalSizeBytes` over the candidates and publishes it as `k10_janitor_candidate_physical_bytes`, deliberately not named "reclaimable". Three reasons to treat it as an indicative upper bound at best:
+  - [available] Deduplication, data shared between restore points, version retention for immutable backups and safety windows can all delay or cancel the gain.
+  - **[unverified]** The field was absent from the entire inventory of the validation cluster, where the sum is therefore 0. That cluster held only `appConfigOnly` restore points with no volume data, so the absence is not conclusive on its own, but the consequence is: a 0 can mean "nothing to gain" or "I do not know". `k10_janitor_candidate_size_unknown_total` and the summary line tell the two apart.
+  - **[unverified]** When the field is present, its value depends on what the storage layer reports. Not every CSI driver reports real physical consumption; several report the logical size. On OpenShift, reportedly only CEPH returns actual physical usage. Do not use this figure for capacity planning.
 - The script does not touch `ClusterRestorePoints` (cluster-scoped resources produced by `BackupClusterAction`). To be handled separately if the need arises.
 - The script does not look for orphaned CSI `VolumeSnapshots` at the storage layer, meaning those no longer referenced by any `RestorePointContent`. That is a distinct kind of leak and needs dedicated logic.
 - `k10.kasten.io/appType` can be absent on restore points created by older Kasten versions. **[available]** present across the entire 9.0.3 inventory, with the value `namespace`. The script treats absence as `namespace` and does not rely on this label to decide.
@@ -244,10 +248,12 @@ application. The classification matches label presence exactly.
 
 - **8.5.x.** None of the above has been checked on that version.
 - **`status.physicalSizeBytes` and `logicalSizeBytes`** are absent from all 8
-  objects, which are all of type `appConfigOnly` with no volume data. The
-  script defaults them to 0, so `reclaimable_bytes` and the "Candidate physical
-  size" line both report 0. Revalidate on a cluster holding real volume
-  snapshots before trusting those figures.
+  objects, which are all of type `appConfigOnly` with no volume data. Every
+  candidate therefore counts as unknown rather than as zero:
+  `k10_janitor_candidate_physical_bytes` is 0 and
+  `k10_janitor_candidate_size_unknown_total` equals the candidate count.
+  Revalidate on a cluster holding real volume snapshots, and check there what
+  the storage layer actually reports, before trusting any figure.
 - **The behaviour of an export whose source snapshot has been retired.** Not
   tested: it requires a real deletion.
 - **An `Unbound` object with no `appName`**, the case that would collapse the

@@ -129,7 +129,7 @@ metrics file is not refreshed.
 |---|---|
 | Kasten 9.0.3 | **Verified in a lab.** The `exportProfile` discriminator behaves as assumed, and a control dry-run classified a real inventory exactly as the labels dictate |
 | Kasten 8.5.x | **Not verified.** Nothing from the 9.0.3 run transfers |
-| Reclaimable bytes | **Not verified.** `status.physicalSizeBytes` was absent from every object of the validation cluster, which held no volume-backed restore points, so the figure reported 0 |
+| Candidate size | **Not verified.** `status.physicalSizeBytes` was absent from every object of the validation cluster, which held no volume-backed restore points. Sizes are reported as unknown rather than as zero, and the figure is never a promise of reclaimable space: what the storage layer reports varies by CSI driver |
 
 Section 9 of the runbook records what was checked, and what still is not. Until
 8.5.x is covered, treat `--apply` on that version as unvalidated.

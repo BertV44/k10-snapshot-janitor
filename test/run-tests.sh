@@ -30,7 +30,7 @@ skip() { printf '  \033[33mSKIP\033[0m %s\n' "$1"; SKIP=$((SKIP+1)); }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 assert_eq() { # expected actual label
-  if [[ "$1" == "$2" ]]; then ok "$3"; else ko "$3 (attendu '$1', obtenu '$2')"; fi
+  if [[ "$1" == "$2" ]]; then ok "$3"; else ko "$3 (expected '$1', got '$2')"; fi
 }
 
 # ------------------------------- Fixtures ------------------------------------
@@ -131,6 +131,26 @@ build_fixtures() {
         labels:{ "k10.kasten.io/appName":"a2", "k10.kasten.io/appNamespace":"prod" } },
       status:{ state:"Bound", actionTime:"2020-01-01T08:00:00.123-04:00", restorePointRef:null } }]}' \
     > "$WORK/fixtures/rpc_offset.json"
+
+  # Two applications, two old snapshots each so one candidate per application.
+  # App "sized" reports physicalSizeBytes, app "unsized" does not: the metrics
+  # must distinguish a real 0 from an unknown size.
+  jq -n --arg a "$(ago 30)" --arg b "$(ago 40)" '
+    def rp($n; $app; $ts; $size):
+      { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
+        metadata:{ name:$n, creationTimestamp:$ts,
+          labels:{ "k10.kasten.io/appName":$app,
+                   "k10.kasten.io/appNamespace":"prod",
+                   "k10.kasten.io/policyName":"daily-prod" } },
+        status:( { state:"Bound", actionTime:$ts,
+                   restorePointRef:{name:("rp-"+$n),namespace:"prod"} }
+                 + (if $size == null then {} else {physicalSizeBytes:$size} end) ) };
+    {apiVersion:"v1",kind:"List",items:[
+      rp("rpc-sized-recent";   "sized";   $a; 1000),
+      rp("rpc-sized-old";      "sized";   $b; 1000),
+      rp("rpc-unsized-recent"; "unsized"; $a; null),
+      rp("rpc-unsized-old";    "unsized"; $b; null)]}' \
+    > "$WORK/fixtures/rpc_sizes.json"
 
   # Non-string timestamp: must yield KEEP, not a jq crash whose exit code
   # would fall outside the documented ones (invariants 4 and 8).
@@ -455,7 +475,7 @@ head_ "Case 23: --metrics-file (issue #7)"
 reset_reports
 rm -f "$WORK/metrics.prom"
 run -d 7 --exclude-namespace protected --metrics-file "$WORK/metrics.prom" || true
-assert_eq "9" "$(grep -c '^k10_janitor_' "$WORK/metrics.prom" 2>/dev/null || echo 0)" "9 metrics written"
+assert_eq "10" "$(grep -c '^k10_janitor_' "$WORK/metrics.prom" 2>/dev/null || echo 0)" "10 metrics written"
 assert_eq "5" "$(awk '/^k10_janitor_candidates_total /{print $2}' "$WORK/metrics.prom" 2>/dev/null)" "candidates_total consistent with the report"
 assert_eq "1" "$(awk '/^k10_janitor_dry_run /{print $2}' "$WORK/metrics.prom" 2>/dev/null)" "dry_run flagged"
 
@@ -500,6 +520,26 @@ run -d 7 --exclude-namespace protected --max-deletions 100 --apply --dry-run && 
 assert_eq "0" "$rc" "exit code 0"
 assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "no deletion despite the earlier --apply"
 assert_eq "5" "$(candidates | wc -w | tr -d ' ')" "the report stays complete"
+
+head_ "Case 30: candidate size, unknown is not zero (issue #16)"
+reset_reports
+rm -f "$WORK/sizes.prom"
+RPC_FIXTURE=rpc_sizes.json run -d 7 --metrics-file "$WORK/sizes.prom" || true
+assert_eq "rpc-sized-old rpc-unsized-old" "$(candidates)" "one candidate per application"
+assert_eq "1000" "$(awk '/^k10_janitor_candidate_physical_bytes /{print $2}' "$WORK/sizes.prom" 2>/dev/null)" \
+  "only the sizes actually reported are summed"
+assert_eq "1" "$(awk '/^k10_janitor_candidate_size_unknown_total /{print $2}' "$WORK/sizes.prom" 2>/dev/null)" \
+  "the candidate with no size is counted as unknown"
+assert_eq "0" "$(grep -c 'k10_janitor_reclaimable_bytes' "$WORK/sizes.prom" 2>/dev/null || true)" \
+  "the old metric name is gone"
+assert_eq "1" "$(grep -c 'unknown size' "$WORK"/reports/*.summary.txt || true)" \
+  "the summary flags the unknown sizes"
+
+# no unknown size at all: the summary stays clean
+reset_reports
+run -d 7 --exclude-namespace protected || true
+assert_eq "0" "$(grep -c 'unknown size' "$WORK"/reports/*.summary.txt || true)" \
+  "no mention when every candidate reports a size"
 
 # --------------------------------- Summary -----------------------------------
 printf '\n\033[1mSummary: %d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"

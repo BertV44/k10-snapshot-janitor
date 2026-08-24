@@ -80,6 +80,8 @@ REQUIRE_UNBOUND=0         # 1 = only target RPC whose application is gone
 ORPHAN_POLICY_ONLY=0      # 1 = only target RPC with no policy, or a deleted one
 POLICY_COUNT="?"          # K10 policies read, "?" if the read failed
 OVER_CAP=0                # 1 = candidates beyond --max-deletions
+CANDIDATE_BYTES=0         # physical size reported for the deletion candidates
+SIZE_UNKNOWN=0            # candidates with no usable physicalSizeBytes
 INCLUDE_EXPORTS=0         # 1 = also include exported restore points (discouraged)
 WAIT_RETIRE=0             # seconds to wait for RetireActions to complete
 REPORT_DIR="${REPORT_DIR:-./k10-janitor-reports}"
@@ -384,8 +386,16 @@ evaluate() {
             actionTime:    (.status.actionTime // null),
             scheduledTime: (.status.scheduledTime // null),
             created:       .metadata.creationTimestamp,
-            logicalSizeBytes:  (.status.logicalSizeBytes  // 0),
-            physicalSizeBytes: (.status.physicalSizeBytes // 0)
+            logicalSizeBytes:
+              (if (.status.logicalSizeBytes | type) == "number"
+               then .status.logicalSizeBytes else 0 end),
+            physicalSizeBytes:
+              (if (.status.physicalSizeBytes | type) == "number"
+               then .status.physicalSizeBytes else 0 end),
+            # Absent, null or non-numeric are all "unknown", never a real zero.
+            # This also keeps a string value out of the sum, where jq add would
+            # concatenate instead of failing.
+            hasPhysicalSize: ((.status.physicalSizeBytes | type) == "number")
           }
         # horodatage de reference : actionTime > scheduledTime > creationTimestamp
         | .refTime = (.actionTime // .scheduledTime // .created)
@@ -480,7 +490,10 @@ summarize() {
   if [[ "$MAX_DELETIONS" -gt 0 && "$CANDIDATES" -gt "$MAX_DELETIONS" ]]; then OVER_CAP=1; fi
   SNAPSHOTS=$(jq -r 'select(.kind=="snapshot") | .name' "$WORKDIR/decisions.jsonl" | wc -l | tr -d ' ')
   EXPORTS=$(jq -r 'select(.kind=="export") | .name' "$WORKDIR/decisions.jsonl" | wc -l | tr -d ' ')
-  RECLAIM_BYTES=$(jq -s '[.[] | select(.decision=="DELETE") | .physicalSizeBytes] | add // 0' "$WORKDIR/decisions.jsonl")
+  CANDIDATE_BYTES=$(jq -s '[.[] | select(.decision=="DELETE" and .hasPhysicalSize)
+                            | .physicalSizeBytes] | add // 0' "$WORKDIR/decisions.jsonl")
+  SIZE_UNKNOWN=$(jq -s '[.[] | select(.decision=="DELETE" and (.hasPhysicalSize | not))]
+                        | length' "$WORKDIR/decisions.jsonl")
 
   {
     echo "=============================================================="
@@ -500,7 +513,7 @@ summarize() {
     echo "   of which local snapshots       : $SNAPSHOTS"
     echo "   of which exports (never purged): $EXPORTS"
     echo " Deletion candidates              : $CANDIDATES"
-    echo " Candidate physical size          : $RECLAIM_BYTES bytes"
+    echo " Candidate physical size          : $CANDIDATE_BYTES bytes$([[ $SIZE_UNKNOWN -gt 0 ]] && echo " ($SIZE_UNKNOWN candidate(s) with unknown size)" || echo '')"
     echo "--------------------------------------------------------------"
     echo " KEEP decisions by reason :"
     # Aggregated in jq rather than 'sort | uniq -c | sort -rn | sed': that
@@ -552,9 +565,12 @@ k10_janitor_deleted_total ${DELETED:-0}
 # HELP k10_janitor_failed_total Number of failed deletions.
 # TYPE k10_janitor_failed_total gauge
 k10_janitor_failed_total ${FAILED:-0}
-# HELP k10_janitor_reclaimable_bytes Cumulated physical size of the candidates.
-# TYPE k10_janitor_reclaimable_bytes gauge
-k10_janitor_reclaimable_bytes $RECLAIM_BYTES
+# HELP k10_janitor_candidate_physical_bytes Physical size reported for the deletion candidates. Not a promise of reclaimable space.
+# TYPE k10_janitor_candidate_physical_bytes gauge
+k10_janitor_candidate_physical_bytes $CANDIDATE_BYTES
+# HELP k10_janitor_candidate_size_unknown_total Deletion candidates whose physicalSizeBytes is absent or not numeric.
+# TYPE k10_janitor_candidate_size_unknown_total gauge
+k10_janitor_candidate_size_unknown_total $SIZE_UNKNOWN
 EOF
   then
     warn "Cannot write metrics: $tmp"
