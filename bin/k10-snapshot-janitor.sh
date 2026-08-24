@@ -206,7 +206,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)             DRY_RUN=1; shift ;;
     -q|--quiet)            QUIET=1; shift ;;
     -h|--help)             usage; exit 0 ;;
-    *) err "Option inconnue : $1"; usage >&2; exit 1 ;;
+    *) err "Unknown option: $1"; usage >&2; exit 1 ;;
   esac
 done
 
@@ -225,7 +225,7 @@ detect_cli() {
     log "CLI forced: $CLI"
     return
   fi
-  # OpenShift : presence de oc ET de l'API config.openshift.io (clusterversion)
+  # OpenShift: oc present AND the config.openshift.io API (clusterversion)
   if command -v oc >/dev/null 2>&1 && \
      oc get clusterversion version >/dev/null 2>&1; then
     CLI="oc"
@@ -320,7 +320,7 @@ json_array() { # turns the arguments into a JSON array
 
 # ---------------------------- Moteur de decision -----------------------------
 # Produces JSONL: one object per RestorePointContent, with .decision =
-#   DELETE | KEEP, et .reason explicite. Aucune mutation ici.
+#   DELETE | KEEP, and an explicit .reason. No mutation happens here.
 evaluate() {
   local ex_ns in_ns ex_pol ex_app
   ex_ns="$(json_array "${EXCLUDE_NS[@]+"${EXCLUDE_NS[@]}"}")"
@@ -397,7 +397,7 @@ evaluate() {
             # concatenate instead of failing.
             hasPhysicalSize: ((.status.physicalSizeBytes | type) == "number")
           }
-        # horodatage de reference : actionTime > scheduledTime > creationTimestamp
+        # reference timestamp: actionTime > scheduledTime > creationTimestamp
         | .refTime = (.actionTime // .scheduledTime // .created)
         | .refEpoch = (.refTime | to_epoch)
         | .ageDays  = (if .refEpoch == null then null
@@ -459,7 +459,7 @@ evaluate() {
     ' "$WORKDIR/rpc.json" > "$WORKDIR/decisions.jsonl"
 }
 
-# -------------------------------- Rapports -----------------------------------
+# --------------------------------- Reports -----------------------------------
 write_reports() {
   mkdir -p "$REPORT_DIR" || die "Report directory not writable: $REPORT_DIR"
   local base="$REPORT_DIR/k10-janitor-$RUN_ID"
@@ -585,7 +585,7 @@ EOF
   log "Prometheus metrics: $METRICS_FILE"
 }
 
-# ------------------------------- Suppression ----------------------------------
+# -------------------------------- Deletion ------------------------------------
 purge() {
   DELETED=0
   FAILED=0
@@ -608,7 +608,7 @@ purge() {
   # and the exit code stays 0 - otherwise the very first scheduled run against
   # a cluster with real backlog marks the Job as Failed.
   if [[ $DRY_RUN -eq 1 ]]; then
-    log "DRY-RUN : $CANDIDATES RestorePointContents seraient supprimes. Aucune action effectuee."
+    log "DRY-RUN: $CANDIDATES RestorePointContents would be deleted. Nothing was done."
     if [[ $over_cap -eq 1 ]]; then
       warn "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : un --apply serait refuse en l'etat."
     fi
@@ -622,7 +622,7 @@ purge() {
     return 2
   fi
 
-  warn "APPLY : suppression de $CANDIDATES RestorePointContents."
+  warn "APPLY: deleting $CANDIDATES RestorePointContents."
   warn "Deletion is permanent and overrides policy retention."
 
   # purge() is called as 'purge || rc=$?': bash suspends errexit AND the ERR
@@ -651,7 +651,7 @@ purge() {
     fi
   done < <(jq -r 'select(.decision=="DELETE") | .name' "$WORKDIR/decisions.jsonl")
 
-  log "Suppressions : $DELETED reussies, $FAILED en echec."
+  log "Deletions: $DELETED succeeded, $FAILED failed."
   if [[ -f "$REPORT_JSONL.audit" ]]; then log "Audit trail: $REPORT_JSONL.audit"; fi
 
   if [[ "$WAIT_RETIRE" -gt 0 && "$DELETED" -gt 0 ]]; then
