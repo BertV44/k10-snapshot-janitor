@@ -80,6 +80,8 @@ REQUIRE_UNBOUND=0         # 1 = only target RPC whose application is gone
 ORPHAN_POLICY_ONLY=0      # 1 = only target RPC with no policy, or a deleted one
 POLICY_COUNT="?"          # K10 policies read, "?" if the read failed
 OVER_CAP=0                # 1 = candidates beyond --max-deletions
+CANDIDATE_BYTES=0         # physical size reported for the deletion candidates
+SIZE_UNKNOWN=0            # candidates with no usable physicalSizeBytes
 INCLUDE_EXPORTS=0         # 1 = also include exported restore points (discouraged)
 WAIT_RETIRE=0             # seconds to wait for RetireActions to complete
 REPORT_DIR="${REPORT_DIR:-./k10-janitor-reports}"
@@ -204,7 +206,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)             DRY_RUN=1; shift ;;
     -q|--quiet)            QUIET=1; shift ;;
     -h|--help)             usage; exit 0 ;;
-    *) err "Option inconnue : $1"; usage >&2; exit 1 ;;
+    *) err "Unknown option: $1"; usage >&2; exit 1 ;;
   esac
 done
 
@@ -223,7 +225,7 @@ detect_cli() {
     log "CLI forced: $CLI"
     return
   fi
-  # OpenShift : presence de oc ET de l'API config.openshift.io (clusterversion)
+  # OpenShift: oc present AND the config.openshift.io API (clusterversion)
   if command -v oc >/dev/null 2>&1 && \
      oc get clusterversion version >/dev/null 2>&1; then
     CLI="oc"
@@ -318,7 +320,7 @@ json_array() { # turns the arguments into a JSON array
 
 # ---------------------------- Moteur de decision -----------------------------
 # Produces JSONL: one object per RestorePointContent, with .decision =
-#   DELETE | KEEP, et .reason explicite. Aucune mutation ici.
+#   DELETE | KEEP, and an explicit .reason. No mutation happens here.
 evaluate() {
   local ex_ns in_ns ex_pol ex_app
   ex_ns="$(json_array "${EXCLUDE_NS[@]+"${EXCLUDE_NS[@]}"}")"
@@ -384,10 +386,25 @@ evaluate() {
             actionTime:    (.status.actionTime // null),
             scheduledTime: (.status.scheduledTime // null),
             created:       .metadata.creationTimestamp,
-            logicalSizeBytes:  (.status.logicalSizeBytes  // 0),
-            physicalSizeBytes: (.status.physicalSizeBytes // 0)
+            # Absent, null, non-numeric and negative all count as "unknown",
+            # never as a real zero. Keeping a string out of the sum also
+            # matters because jq add concatenates strings instead of failing.
+            hasLogicalSize:
+              ((.status.logicalSizeBytes | type) == "number"
+               and .status.logicalSizeBytes >= 0),
+            hasPhysicalSize:
+              ((.status.physicalSizeBytes | type) == "number"
+               and .status.physicalSizeBytes >= 0),
+            logicalSizeBytes:
+              (if (.status.logicalSizeBytes | type) == "number"
+                  and .status.logicalSizeBytes >= 0
+               then .status.logicalSizeBytes else 0 end),
+            physicalSizeBytes:
+              (if (.status.physicalSizeBytes | type) == "number"
+                  and .status.physicalSizeBytes >= 0
+               then .status.physicalSizeBytes else 0 end)
           }
-        # horodatage de reference : actionTime > scheduledTime > creationTimestamp
+        # reference timestamp: actionTime > scheduledTime > creationTimestamp
         | .refTime = (.actionTime // .scheduledTime // .created)
         | .refEpoch = (.refTime | to_epoch)
         | .ageDays  = (if .refEpoch == null then null
@@ -449,7 +466,7 @@ evaluate() {
     ' "$WORKDIR/rpc.json" > "$WORKDIR/decisions.jsonl"
 }
 
-# -------------------------------- Rapports -----------------------------------
+# --------------------------------- Reports -----------------------------------
 write_reports() {
   mkdir -p "$REPORT_DIR" || die "Report directory not writable: $REPORT_DIR"
   local base="$REPORT_DIR/k10-janitor-$RUN_ID"
@@ -465,7 +482,8 @@ write_reports() {
         .runId, .decision, .reason, .name, .state, .appNamespace, .appName, .appType,
         .policyName, (.policyExists|tostring), (.onDemand|tostring), .kind,
         (.refTime // ""), ((.ageDays // "")|tostring), (.rank|tostring),
-        (.logicalSizeBytes|tostring), (.physicalSizeBytes|tostring),
+        (if .hasLogicalSize  then (.logicalSizeBytes|tostring)  else "" end),
+        (if .hasPhysicalSize then (.physicalSizeBytes|tostring) else "" end),
         (if .rpNamespace == "" then "" else .rpNamespace + "/" + .rpName end)
       ] | @csv' "$WORKDIR/decisions.jsonl"
   } > "$REPORT_CSV"
@@ -480,7 +498,10 @@ summarize() {
   if [[ "$MAX_DELETIONS" -gt 0 && "$CANDIDATES" -gt "$MAX_DELETIONS" ]]; then OVER_CAP=1; fi
   SNAPSHOTS=$(jq -r 'select(.kind=="snapshot") | .name' "$WORKDIR/decisions.jsonl" | wc -l | tr -d ' ')
   EXPORTS=$(jq -r 'select(.kind=="export") | .name' "$WORKDIR/decisions.jsonl" | wc -l | tr -d ' ')
-  RECLAIM_BYTES=$(jq -s '[.[] | select(.decision=="DELETE") | .physicalSizeBytes] | add // 0' "$WORKDIR/decisions.jsonl")
+  CANDIDATE_BYTES=$(jq -s '[.[] | select(.decision=="DELETE" and .hasPhysicalSize)
+                            | .physicalSizeBytes] | add // 0' "$WORKDIR/decisions.jsonl")
+  SIZE_UNKNOWN=$(jq -s '[.[] | select(.decision=="DELETE" and (.hasPhysicalSize | not))]
+                        | length' "$WORKDIR/decisions.jsonl")
 
   {
     echo "=============================================================="
@@ -500,7 +521,7 @@ summarize() {
     echo "   of which local snapshots       : $SNAPSHOTS"
     echo "   of which exports (never purged): $EXPORTS"
     echo " Deletion candidates              : $CANDIDATES"
-    echo " Candidate physical size          : $RECLAIM_BYTES bytes"
+    echo " Candidate physical size          : $CANDIDATE_BYTES bytes$([[ $SIZE_UNKNOWN -gt 0 ]] && echo " ($SIZE_UNKNOWN candidate(s) with unknown size)" || echo '')"
     echo "--------------------------------------------------------------"
     echo " KEEP decisions by reason :"
     # Aggregated in jq rather than 'sort | uniq -c | sort -rn | sed': that
@@ -552,9 +573,12 @@ k10_janitor_deleted_total ${DELETED:-0}
 # HELP k10_janitor_failed_total Number of failed deletions.
 # TYPE k10_janitor_failed_total gauge
 k10_janitor_failed_total ${FAILED:-0}
-# HELP k10_janitor_reclaimable_bytes Cumulated physical size of the candidates.
-# TYPE k10_janitor_reclaimable_bytes gauge
-k10_janitor_reclaimable_bytes $RECLAIM_BYTES
+# HELP k10_janitor_candidate_physical_bytes Physical size reported for the deletion candidates. Not a promise of reclaimable space.
+# TYPE k10_janitor_candidate_physical_bytes gauge
+k10_janitor_candidate_physical_bytes $CANDIDATE_BYTES
+# HELP k10_janitor_candidate_size_unknown_total Deletion candidates whose physicalSizeBytes is absent or not numeric.
+# TYPE k10_janitor_candidate_size_unknown_total gauge
+k10_janitor_candidate_size_unknown_total $SIZE_UNKNOWN
 EOF
   then
     warn "Cannot write metrics: $tmp"
@@ -569,7 +593,7 @@ EOF
   log "Prometheus metrics: $METRICS_FILE"
 }
 
-# ------------------------------- Suppression ----------------------------------
+# -------------------------------- Deletion ------------------------------------
 purge() {
   DELETED=0
   FAILED=0
@@ -592,7 +616,7 @@ purge() {
   # and the exit code stays 0 - otherwise the very first scheduled run against
   # a cluster with real backlog marks the Job as Failed.
   if [[ $DRY_RUN -eq 1 ]]; then
-    log "DRY-RUN : $CANDIDATES RestorePointContents seraient supprimes. Aucune action effectuee."
+    log "DRY-RUN: $CANDIDATES RestorePointContents would be deleted. Nothing was done."
     if [[ $over_cap -eq 1 ]]; then
       warn "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : un --apply serait refuse en l'etat."
     fi
@@ -606,7 +630,7 @@ purge() {
     return 2
   fi
 
-  warn "APPLY : suppression de $CANDIDATES RestorePointContents."
+  warn "APPLY: deleting $CANDIDATES RestorePointContents."
   warn "Deletion is permanent and overrides policy retention."
 
   # purge() is called as 'purge || rc=$?': bash suspends errexit AND the ERR
@@ -635,7 +659,7 @@ purge() {
     fi
   done < <(jq -r 'select(.decision=="DELETE") | .name' "$WORKDIR/decisions.jsonl")
 
-  log "Suppressions : $DELETED reussies, $FAILED en echec."
+  log "Deletions: $DELETED succeeded, $FAILED failed."
   if [[ -f "$REPORT_JSONL.audit" ]]; then log "Audit trail: $REPORT_JSONL.audit"; fi
 
   if [[ "$WAIT_RETIRE" -gt 0 && "$DELETED" -gt 0 ]]; then

@@ -14,7 +14,7 @@ and optionally retires them. Dry-run by default.
 Kasten retires restore points through policy retention. Restore points that no
 policy retains are never cleaned up automatically:
 
-- on-demand snapshots taken without an `expiresAt` value
+- on-demand snapshots the garbage collector will never reclaim, because no expiry is set or because retention is explicitly unlimited
 - snapshots whose originating policy has since been deleted
 - snapshots of applications or namespaces that no longer exist in the cluster
 
@@ -101,15 +101,15 @@ procedure.
 ./test/run-tests.sh
 ```
 
-91 assertions, entirely offline: fixtures and a stub CLI are generated on the
+101 assertions, entirely offline: fixtures and a stub CLI are generated on the
 fly, no cluster is contacted. A skipped case is fatal — a suite that quietly
 runs at 97% is worse than one that fails, so `python3` and `pyyaml` are
 required for the manifest checks.
 
 Guards that matter are verified by mutation, not just by passing: breaking the
 export discriminator, the age comparison, the resource targeted by the delete
-call, or the globbing protection in the CronJob each make a specific assertion
-fail.
+call, the globbing protection in the CronJob, or the typing of the reported
+sizes each make a specific assertion fail.
 
 ## Exit codes
 
@@ -129,7 +129,7 @@ metrics file is not refreshed.
 |---|---|
 | Kasten 9.0.3 | **Verified in a lab.** The `exportProfile` discriminator behaves as assumed, and a control dry-run classified a real inventory exactly as the labels dictate |
 | Kasten 8.5.x | **Not verified.** Nothing from the 9.0.3 run transfers |
-| Reclaimable bytes | **Not verified.** `status.physicalSizeBytes` was absent from every object of the validation cluster, which held no volume-backed restore points, so the figure reported 0 |
+| Candidate size | **Not verified.** `status.physicalSizeBytes` was absent from every object of the validation cluster, which held no volume-backed restore points. Sizes are reported as unknown rather than as zero, and the figure is never a promise of reclaimable space: what the storage layer reports varies by CSI driver |
 
 Section 9 of the runbook records what was checked, and what still is not. Until
 8.5.x is covered, treat `--apply` on that version as unvalidated.
