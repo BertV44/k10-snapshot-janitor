@@ -6,8 +6,8 @@
 # and logs the requested deletions. The suite validates the KEEP/DELETE
 # decisions, the guards and the exit codes.
 #
-# Usage : ./test/run-tests.sh
-# Dependencies : bash >= 4, jq >= 1.6, python3 + pyyaml
+# Usage: ./test/run-tests.sh
+# Dependencies: bash >= 4, jq >= 1.6, python3 + pyyaml
 #
 # python3 + pyyaml are required: without them the manifest validation is
 # skipped, and a truncated suite exiting 0 would suggest everything had been
@@ -87,9 +87,9 @@ build_fixtures() {
   # Kubernetes allows an empty label value. Invariant 2 makes the ABSENCE of
   # the exportProfile label the discriminator, not its value.
   {
-    rpc rpc-ev-snapshot    Bound   prod       mysql      daily-prod  ""        1   0
-    rpc rpc-ev-export      Bound   prod       mysql      daily-prod  "<empty>" 60  0
-  } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_export_vide.json"
+    rpc rpc-emptyval-snapshot  Bound   prod       mysql      daily-prod  ""        1   0
+    rpc rpc-emptyval-export    Bound   prod       mysql      daily-prod  "<empty>" 60  0
+  } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_export_empty.json"
 
   # Two old exports, one of them exempt: checks that the exemption still wins
   # when --include-exports widens the perimeter.
@@ -103,11 +103,11 @@ build_fixtures() {
   # the threshold must be kept. Each application has a recent object so the one
   # under test is not rank 0 and does not fall to min-keep-guard.
   {
-    rpc rpc-bord-recent-a  Bound   prod       borda      daily-prod  ""      0   0
-    rpc rpc-bord-pile      Bound   prod       borda      daily-prod  ""      7   0
-    rpc rpc-bord-recent-b  Bound   prod       bordb      daily-prod  ""      0   0
-    rpc rpc-bord-au-dela   Bound   prod       bordb      daily-prod  ""      8   0
-  } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_bordure.json"
+    rpc rpc-edge-recent-a  Bound   prod       edgea      daily-prod  ""      0   0
+    rpc rpc-edge-exact     Bound   prod       edgea      daily-prod  ""      7   0
+    rpc rpc-edge-recent-b  Bound   prod       edgeb      daily-prod  ""      0   0
+    rpc rpc-edge-beyond    Bound   prod       edgeb      daily-prod  ""      8   0
+  } | jq -s '{apiVersion:"v1",kind:"List",items:.}' > "$WORK/fixtures/rpc_boundary.json"
 
   # None of the three timestamp sources: actionTime, scheduledTime and
   # creationTimestamp all absent or null.
@@ -117,7 +117,7 @@ build_fixtures() {
         labels:{ "k10.kasten.io/appName":"mysql",
                  "k10.kasten.io/appNamespace":"prod" } },
       status:{ state:"Bound", restorePointRef:null } }]}' \
-    > "$WORK/fixtures/rpc_sans_ts.json"
+    > "$WORK/fixtures/rpc_no_ts.json"
 
   # Timestamps with a numeric offset: jq fromdateiso8601 accepts the Z suffix
   # only. These objects must fall to KEEP, never to DELETE.
@@ -127,7 +127,7 @@ build_fixtures() {
         labels:{ "k10.kasten.io/appName":"a1", "k10.kasten.io/appNamespace":"prod" } },
       status:{ state:"Bound", actionTime:"2020-01-01T10:00:00+02:00", restorePointRef:null } },
     { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
-      metadata:{ name:"rpc-offset-moins", creationTimestamp:"2020-01-01T08:00:00-04:00",
+      metadata:{ name:"rpc-offset-minus", creationTimestamp:"2020-01-01T08:00:00-04:00",
         labels:{ "k10.kasten.io/appName":"a2", "k10.kasten.io/appNamespace":"prod" } },
       status:{ state:"Bound", actionTime:"2020-01-01T08:00:00.123-04:00", restorePointRef:null } }]}' \
     > "$WORK/fixtures/rpc_offset.json"
@@ -160,12 +160,12 @@ build_fixtures() {
   # would fall outside the documented ones (invariants 4 and 8).
   jq -n --arg ts "$(ago 60)" '{apiVersion:"v1",kind:"List",items:[
     { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
-      metadata:{ name:"rpc-ts-numerique", creationTimestamp:$ts,
+      metadata:{ name:"rpc-ts-numeric", creationTimestamp:$ts,
         labels:{ "k10.kasten.io/appName":"mysql",
                  "k10.kasten.io/appNamespace":"prod" } },
       status:{ state:"Bound", actionTime:1234567890,
         logicalSizeBytes:0, physicalSizeBytes:0, restorePointRef:null } }]}' \
-    > "$WORK/fixtures/rpc_ts_numerique.json"
+    > "$WORK/fixtures/rpc_ts_numeric.json"
 
   # "gone-policy" is deliberately absent from this list
   jq -n '{apiVersion:"v1",kind:"List",items:[
@@ -344,12 +344,12 @@ assert_eq "" "$(candidates)" "no candidate"
 
 head_ "Case 9: missing binary"
 reset_reports
-PATH="$WORK/bin:$PATH" "$SCRIPT" --cli inexistant -q >/dev/null 2>&1 && rc=0 || rc=$?
+PATH="$WORK/bin:$PATH" "$SCRIPT" --cli nonexistent -q >/dev/null 2>&1 && rc=0 || rc=$?
 assert_eq "3" "$rc" "exit code 3 on a missing prerequisite"
 
 head_ "Case 10: exemption label key is overridable"
 reset_reports
-run -d 7 --exclude-namespace protected --exempt-label autre/cle || true
+run -d 7 --exclude-namespace protected --exempt-label other/key || true
 assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-ex-2)" "the old label no longer protects"
 
 head_ "Case 11: manifests"
@@ -409,8 +409,8 @@ assert_eq "5" "$(candidates | wc -w | tr -d ' ')" "the report is produced despit
 
 head_ "Case 13: exportProfile label present but empty-valued (invariant 2)"
 reset_reports
-RPC_FIXTURE=rpc_export_vide.json run -d 7 || true
-assert_eq "KEEP export-restorepoint" "$(decision_of rpc-ev-export)" "an export with an empty label value stays an export"
+RPC_FIXTURE=rpc_export_empty.json run -d 7 || true
+assert_eq "KEEP export-restorepoint" "$(decision_of rpc-emptyval-export)" "an export with an empty label value stays an export"
 assert_eq "" "$(candidates)" "no deletion candidate"
 
 head_ "Case 14: --min-keep 0 rejected (invariant 3)"
@@ -421,9 +421,9 @@ assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "no deletion"
 
 head_ "Case 15: non-string timestamp (invariants 4 and 8)"
 reset_reports
-RPC_FIXTURE=rpc_ts_numerique.json run -d 7 && rc=0 || rc=$?
+RPC_FIXTURE=rpc_ts_numeric.json run -d 7 && rc=0 || rc=$?
 assert_eq "0" "$rc" "exit code within the documented set"
-assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-ts-numerique)" "non-string timestamp kept"
+assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-ts-numeric)" "non-string timestamp kept"
 
 head_ "Case 16: nothing but a RestorePointContent is mutated (invariant 7)"
 reset_reports
@@ -480,9 +480,9 @@ assert_eq "rpc-ie-export" "$(candidates)" "only the non-exempt export is a candi
 
 head_ "Case 21: age boundary, the threshold is inclusive (issue #7)"
 reset_reports
-RPC_FIXTURE=rpc_bordure.json run -d 7 || true
-assert_eq "KEEP within-retention"          "$(decision_of rpc-bord-pile)"    "an object exactly on the threshold is kept"
-assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-bord-au-dela)" "an object past the threshold is a candidate"
+RPC_FIXTURE=rpc_boundary.json run -d 7 || true
+assert_eq "KEEP within-retention"          "$(decision_of rpc-edge-exact)"   "an object exactly on the threshold is kept"
+assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-edge-beyond)"  "an object past the threshold is a candidate"
 
 head_ "Case 22: --exclude-policy and --exclude-app (issue #7)"
 reset_reports
@@ -502,16 +502,16 @@ assert_eq "1" "$(awk '/^k10_janitor_dry_run /{print $2}' "$WORK/metrics.prom" 2>
 
 head_ "Case 24: none of the three timestamp sources (invariant 4)"
 reset_reports
-RPC_FIXTURE=rpc_sans_ts.json run -d 7 && rc=0 || rc=$?
+RPC_FIXTURE=rpc_no_ts.json run -d 7 && rc=0 || rc=$?
 assert_eq "0" "$rc" "exit code 0"
 assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-no-timestamp)" "object with no timestamp kept"
 
 head_ "Case 25: the exemption label is not settable from the environment (issue #9)"
 reset_reports
-LBL_EXEMPT=autre/cle run -d 7 --exclude-namespace protected || true
+LBL_EXEMPT=other/key run -d 7 --exclude-namespace protected || true
 assert_eq "KEEP labelled-exempt" "$(decision_of rpc-ex-2)" "an environment variable does not disable the exemptions"
 reset_reports
-run -d 7 --exclude-namespace protected --exempt-label autre/cle || true
+run -d 7 --exclude-namespace protected --exempt-label other/key || true
 assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-ex-2)" "--exempt-label stays the only override"
 
 head_ "Case 26: timestamp with a numeric offset (invariant 4)"
@@ -519,7 +519,7 @@ reset_reports
 RPC_FIXTURE=rpc_offset.json run -d 7 && rc=0 || rc=$?
 assert_eq "0" "$rc" "exit code 0"
 assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-offset-plus)"  "positive offset kept"
-assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-offset-moins)" "negative offset kept"
+assert_eq "KEEP timestamp-unparseable" "$(decision_of rpc-offset-minus)" "negative offset kept"
 assert_eq "" "$(candidates)" "no candidate"
 
 head_ "Case 27: audit trail unwritable during an --apply"
@@ -531,7 +531,7 @@ assert_eq "1" "$rc" "an incomplete audit after deletion cannot exit 0"
 head_ "Case 28: a metrics write failure does not overwrite the exit code"
 reset_reports
 run -d 7 --exclude-namespace protected --max-deletions 3 --apply \
-    --metrics-file "$WORK/inexistant/m.prom" && rc=0 || rc=$?
+    --metrics-file "$WORK/nonexistent/m.prom" && rc=0 || rc=$?
 assert_eq "2" "$rc" "the exceeded cap stays exit 2 despite the metrics failure"
 assert_eq "" "$(cat "$WORK/deleted.log" 2>/dev/null || true)" "no deletion"
 
