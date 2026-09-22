@@ -85,8 +85,8 @@ jobs:
             --exclude-dir=.git --exclude=NOTICE --exclude=README.md \
             --exclude=CLAUDE.md --exclude-dir=.github . )
           if [ -n "$MATCHES" ]; then
-            echo "Motifs suspects detectes :"
+            echo "Suspicious patterns detected:"
             echo "$MATCHES"
             exit 1
           fi
-          echo "Aucun motif suspect."
+          echo "No suspicious pattern found."

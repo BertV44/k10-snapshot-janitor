@@ -218,7 +218,7 @@ done
 [[ "$MAX_DELETIONS"  =~ ^[0-9]+$ ]] || die "--max-deletions must be an integer"
 [[ "$WAIT_RETIRE"    =~ ^[0-9]+$ ]] || die "--wait-retire must be an integer"
 
-# -------------------------- Prerequis / autodetection ------------------------
+# -------------------------- Prerequisites / autodetection --------------------
 detect_cli() {
   if [[ -n "$CLI" ]]; then
     command -v "$CLI" >/dev/null 2>&1 || { err "Binary '$CLI' not found"; exit 3; }
@@ -234,10 +234,10 @@ detect_cli() {
        oc api-resources --api-group=config.openshift.io -o name >/dev/null 2>&1 && \
        [[ -n "$(oc api-resources --api-group=config.openshift.io -o name 2>/dev/null)" ]]; then
     CLI="oc"
-    log "API config.openshift.io detectee -> utilisation de 'oc'"
+    log "config.openshift.io API detected -> using 'oc'"
   elif command -v kubectl >/dev/null 2>&1; then
     CLI="kubectl"
-    log "Cluster Kubernetes vanilla -> utilisation de 'kubectl'"
+    log "Vanilla Kubernetes cluster -> using 'kubectl'"
   elif command -v oc >/dev/null 2>&1; then
     CLI="oc"
     warn "kubectl not found, falling back to 'oc' in generic Kubernetes mode"
@@ -274,7 +274,7 @@ check_prereqs() {
   if [[ -n "$v" ]]; then log "K10 version detected: $v"; fi
 }
 
-# ------------------------------- Collecte K10 --------------------------------
+# ------------------------------- K10 collection ------------------------------
 WORKDIR="$(mktemp -d -t k10janitor.XXXXXX)"
 cleanup() { rm -rf "$WORKDIR"; }
 trap cleanup EXIT
@@ -318,7 +318,7 @@ json_array() { # turns the arguments into a JSON array
   if [[ $# -eq 0 ]]; then echo '[]'; else printf '%s\n' "$@" | jq -R . | jq -s .; fi
 }
 
-# ---------------------------- Moteur de decision -----------------------------
+# ---------------------------- Decision engine --------------------------------
 # Produces JSONL: one object per RestorePointContent, with .decision =
 #   DELETE | KEEP, and an explicit .reason. No mutation happens here.
 evaluate() {
@@ -350,7 +350,7 @@ evaluate() {
     --arg runId "$RUN_ID" \
     '
     def norm_ts:
-      # type != "string" couvre null, nombre, booleen, tableau, objet : sub()
+      # type != "string" covers null, number, boolean, array and object: sub()
       # would raise an uncatchable error on those types.
       if (type != "string") or . == "" then null
       # jq fromdateiso8601 accepts the Z suffix only. So we strip fractional
@@ -523,7 +523,7 @@ summarize() {
     echo " Deletion candidates              : $CANDIDATES"
     echo " Candidate physical size          : $CANDIDATE_BYTES bytes$([[ $SIZE_UNKNOWN -gt 0 ]] && echo " ($SIZE_UNKNOWN candidate(s) with unknown size)" || echo '')"
     echo "--------------------------------------------------------------"
-    echo " KEEP decisions by reason :"
+    echo " KEEP decisions by reason:"
     # Aggregated in jq rather than 'sort | uniq -c | sort -rn | sed': that
     # removes sed, the only binary outside bash, jq, oc/kubectl and coreutils.
     jq -rs '
@@ -534,7 +534,7 @@ summarize() {
       | .[] | "   \(.n | lpad(4)) \(.reason)"' "$WORKDIR/decisions.jsonl"
     echo "--------------------------------------------------------------"
     if [[ "$CANDIDATES" -gt 0 ]]; then
-      echo " Candidates (age_days | namespace/app | policy | rpc) :"
+      echo " Candidates (age_days | namespace/app | policy | rpc):"
       jq -r 'select(.decision=="DELETE")
              | "   \(.ageDays)d | \(.appNamespace)/\(.appName) | \(if .policyName=="" then "<on-demand>" else .policyName end) | \(.name)"' \
         "$WORKDIR/decisions.jsonl"
@@ -618,7 +618,7 @@ purge() {
   if [[ $DRY_RUN -eq 1 ]]; then
     log "DRY-RUN: $CANDIDATES RestorePointContents would be deleted. Nothing was done."
     if [[ $over_cap -eq 1 ]]; then
-      warn "$CANDIDATES candidats > plafond --max-deletions=$MAX_DELETIONS : un --apply serait refuse en l'etat."
+      warn "$CANDIDATES candidates > --max-deletions=$MAX_DELETIONS cap: an --apply would be refused as things stand."
     fi
     log "Re-run with --apply to perform the purge."
     return 0
@@ -686,7 +686,7 @@ wait_for_retire() {
       log "All RetireActions have completed."
       return 0
     fi
-    log "RetireActions en cours : $pending"
+    log "RetireActions still running: $pending"
     sleep 15
   done
   warn "Timeout reached, some RetireActions are still running (normal for large exports)."

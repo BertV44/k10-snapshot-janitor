@@ -49,7 +49,7 @@ rules:
   - apiGroups: ["actions.kio.kasten.io"]
     resources: ["retireactions"]
     verbs: ["get", "list"]
-  # Verification de presence du CRD au demarrage (facultatif : retirer si refuse)
+  # CRD presence check at startup (optional: remove if refused)
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get"]
@@ -179,11 +179,11 @@ spec:
               type: RuntimeDefault
           containers:
             - name: purge
-              # Image contenant oc (ou kubectl) et jq >= 1.6.
+              # Image carrying oc (or kubectl) and jq >= 1.6.
               # Build with the provided Containerfile, then push it to the
-              # registre interne :
+              # internal registry:
               #   image-registry.openshift-image-registry.svc:5000/kasten-io/k10-snapshot-janitor:1.0.0
-              # Alternative publique rapide : docker.io/alpine/k8s:1.30.2
+              # Quick public alternative: docker.io/alpine/k8s:1.30.2
               image: REGISTRY/k10-snapshot-janitor:1.0.0
               imagePullPolicy: IfNotPresent
               securityContext:
