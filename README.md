@@ -32,6 +32,10 @@ reports them, and can retire them on a schedule.
   label, not its value: Kubernetes allows an empty label value, and an export
   is still an export. `--include-exports` lifts that protection; it exists, it
   is discouraged, and the shipped CronJob never uses it.
+- Snapshots with no expiry are **flagged**: the `k10.kasten.io/expiresAt` label
+  is read for information only (`expiry_state` in the reports, a summary line,
+  the `k10_janitor_no_expiry_snapshots_total` metric) and never drives a
+  decision unless `--include-no-expiry` is given.
 - Does not handle `ClusterRestorePoint` objects, nor orphaned CSI
   `VolumeSnapshot` objects at the storage layer.
 
@@ -58,6 +62,13 @@ reports them, and can retire them on a schedule.
   --report-dir ./reports --apply
 ```
 
+`--include-no-expiry` is an opt-in that also targets snapshots carrying no expiry
+label, on-demand or created by a policy, even when `--require-unbound` or
+`--orphan-policy-only` would protect them. A GFS policy point may carry no
+expiry label, so it can be deleted despite its policy: read the dry-run first
+and use `--exclude-policy` for the policies to protect. The shipped CronJob
+never uses it.
+
 `--dry-run` forces report-only mode and overrides an `--apply` placed earlier on
 the command line. `--wait-retire N` waits up to N seconds for the triggered
 `RetireActions` to complete. Run `--help` for the full option list.
@@ -71,6 +82,7 @@ the command line. `--wait-retire N` waits up to N seconds for the triggered
 | `--max-deletions N` | Under `--apply`, aborts with exit code 2 if candidates exceed N, deleting nothing. A dry-run reports the overflow and still exits 0 |
 | Exemption label | `k10-janitor/exempt=true` on a `RestorePointContent` excludes it permanently |
 | Exports excluded | Exported restore points are never candidates in normal operation |
+| `--include-no-expiry` | Off by default. Releases only the `--require-unbound` and `--orphan-policy-only` guards, and only for a snapshot with no expiry label. Dated or unparsable expiry, the exemption label, `--min-keep` and exports stay protected |
 | Unparsable timestamp | Always resolves to `KEEP`, including a numeric offset such as `+02:00`, or a value that is not a string at all |
 | `--min-keep 0` | Rejected outright with exit 1: no application may be left without a restore point |
 | Missing policy data | If `--orphan-policy-only` is requested and the policy list is unreadable or empty, the run aborts with exit 3 rather than dropping the filter |
@@ -101,7 +113,7 @@ procedure.
 ./test/run-tests.sh
 ```
 
-101 assertions, entirely offline: fixtures and a stub CLI are generated on the
+123 assertions, entirely offline: fixtures and a stub CLI are generated on the
 fly, no cluster is contacted. A skipped case is fatal — a suite that quietly
 runs at 97% is worse than one that fails, so `python3` and `pyyaml` are
 required for the manifest checks.
@@ -129,6 +141,7 @@ metrics file is not refreshed.
 |---|---|
 | Kasten 9.0.3 | **Verified in a lab.** The `exportProfile` discriminator behaves as assumed, and a control dry-run classified a real inventory exactly as the labels dictate |
 | Kasten 8.5.x | **Not verified.** Nothing from the 9.0.3 run transfers |
+| Expiry label | **Observed on 9.0.3, read-only.** The expiry is the label `k10.kasten.io/expiresAt` (`spec` is `null`), absent when no expiry is set, with hyphens in place of the time colons. `N/A` and `No Expiration` cannot be told apart, and 8.5.x is **not verified**. `--include-no-expiry` was exercised in dry-run only, never with `--apply`. **[validate in a lab]** |
 | Candidate size | **Not verified.** `status.physicalSizeBytes` was absent from every object of the validation cluster, which held no volume-backed restore points. Sizes are reported as unknown rather than as zero, and the figure is never a promise of reclaimable space: what the storage layer reports varies by CSI driver |
 
 Section 9 of the runbook records what was checked, and what still is not. Until
