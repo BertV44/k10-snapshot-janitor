@@ -97,7 +97,7 @@ The conservative mode corresponds to `CONSERVATIVE_MODE: "true"` in the ConfigMa
 
 ### Opt-in: `--include-no-expiry`
 
-Releases a snapshot from `--require-unbound` and `--orphan-policy-only` when it carries no `k10.kasten.io/expiresAt` label, provided it is past `--retention-days` and outside the `--min-keep` guard. The age rule is the same for every kind of no-expiry snapshot: `No Expiration` (manual run), `N/A` (scheduled run), on-demand, and snapshots of a deleted policy. A dated expiry, an unparsable one, the K10 disaster recovery policy (`k10-disaster-recovery-policy`, observed name on 9.0.3, **[unverified]** in the docs), the exemption label and every export stay protected. It is off by default and the `CronJob` does not use it.
+Releases a snapshot from `--require-unbound` and `--orphan-policy-only` when it carries no `k10.kasten.io/expiresAt` label, provided it is past `--retention-days` and outside the `--min-keep` guard. The age rule is the same for every kind of no-expiry snapshot: `No Expiration` (manual run), `N/A` (scheduled run), on-demand, and snapshots of a deleted policy. A dated expiry, an unparsable one, the exemption label and every export stay protected. It is off by default and the `CronJob` does not use it.
 
 **Warning:** a scheduled snapshot a policy still legitimately keeps (a weekly, monthly or yearly point) also shows `N/A`, and is released once it is older than `--retention-days`. Read the dry-run first. As information, the JSONL carries `policyHorizonDays` (how long the policy can keep a scheduled snapshot: `(largest tier count + 1) * tier period` from `spec.retention`, so `daily: 2` gives 3 days and `weekly: 4` gives 35; null when the policy has no usable retention, is paused or is gone), and the summary counts the candidates still inside that horizon. It gates nothing: choose `--retention-days` above the horizon you want to respect, and use `--exclude-policy` for the policies to protect. Observed on 9.0.3, **[unverified]** in the Kasten documentation and on 8.5.x, **[validate in a lab]** before any `--apply`.
 
@@ -105,6 +105,7 @@ Releases a snapshot from `--require-unbound` and `--orphan-policy-only` when it 
 
 | Guard | Behaviour |
 |---|---|
+| K10 disaster recovery | Snapshots of `k10-disaster-recovery-policy` are always kept (reason `k10-dr-policy-protected`), whatever the options. The name is observed on 9.0.3, **[unverified]** in the Kasten documentation, **[validate in a lab]**. |
 | Dry-run by default | No deletion without `--apply`. The report is produced either way. |
 | `--dry-run` | Forces report-only mode, and overrides an `--apply` placed earlier on the command line. |
 | `--min-keep N` | Always keeps the N most recent snapshots per application (`appNamespace/appName`), even past the threshold. Default 1, and **0 is rejected outright**: no application may be left without a restore point. |

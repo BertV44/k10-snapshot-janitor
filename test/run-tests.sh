@@ -712,7 +712,7 @@ RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --require-unbound --orphan-policy-
 assert_eq "rpc-nx-policy rpc-nx-target" "$(candidates)" "with the flag, the no-expiry snapshots are candidates, on-demand or policy"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-dated)"     "a dated expiry is still protected"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-badexpiry)" "an unparsable expiry is still protected"
-assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-dr)"        "the K10 disaster recovery policy is never released by the flag"
+assert_eq "KEEP k10-dr-policy-protected"    "$(decision_of rpc-nx-dr)"        "the K10 disaster recovery policy is never released by the flag"
 assert_eq "KEEP labelled-exempt"            "$(decision_of rpc-nx-exempt)"    "the exemption label still wins"
 assert_eq "KEEP export-restorepoint"        "$(decision_of rpc-nx-export)"    "an export is still never deleted"
 assert_eq "KEEP within-retention"           "$(decision_of rpc-nx-recent)"    "the recent point is still kept"
@@ -724,7 +724,7 @@ assert_eq "rpc-nx-policy rpc-nx-target" "$(sed 's/.* //' "$WORK/deleted.log" 2>/
 # its policy is known to exist
 reset_reports
 RPC_FIXTURE=rpc_noexpiry_delete.json POLICY_FIXTURE=policies_dr.json run -d 7 --orphan-policy-only --include-no-expiry || true
-assert_eq "KEEP policy-still-active" "$(decision_of rpc-nx-dr)" "the DR policy snapshot is kept under --orphan-policy-only"
+assert_eq "KEEP k10-dr-policy-protected" "$(decision_of rpc-nx-dr)" "the DR policy snapshot is kept under --orphan-policy-only"
 # --orphan-policy-only alone: an active policy normally protects its snapshots
 reset_reports
 RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --orphan-policy-only || true
@@ -766,6 +766,17 @@ assert_eq "null" "$(jq -r 'select(.name=="rpc-hz-paused")     | .policyHorizonDa
 # warning line: candidates a policy would still legitimately keep (weekly-in, yearly-in)
 assert_eq "1" "$(grep -c 'candidates still inside their policy retention.*: 2$' "$WORK"/reports/*.summary.txt || true)" \
   "the summary counts the candidates still inside their policy retention"
+
+head_ "Case 35: the K10 disaster recovery policy is always protected, whatever the options"
+for opts in "-d 7" "-d 7 --orphan-policy-only" "-d 7 --require-unbound --orphan-policy-only --include-no-expiry"; do
+  reset_reports
+  # shellcheck disable=SC2086
+  RPC_FIXTURE=rpc_noexpiry_delete.json run $opts || true
+  assert_eq "KEEP k10-dr-policy-protected" "$(decision_of rpc-nx-dr)" "DR snapshot kept with: $opts"
+done
+reset_reports
+RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --apply || true
+assert_eq "0" "$(grep -c 'rpc-nx-dr' "$WORK/deleted.log" 2>/dev/null || true)" "--apply never deletes the DR snapshot"
 
 # --------------------------------- Summary -----------------------------------
 printf '\n\033[1mSummary: %d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"
