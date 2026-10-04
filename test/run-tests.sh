@@ -240,9 +240,42 @@ build_fixtures() {
       rp("rpc-rn-scheduled";     $a; false; null)]}' \
     > "$WORK/fixtures/rpc_runnow.json"
 
+  # Policy retention horizon: how long a policy can legitimately keep a
+  # scheduled snapshot. Observed on K10 9.0.3: spec.retention holds counts per
+  # tier (daily, weekly...). Horizon = (largest tier count + 1) * tier period.
+  jq -n '{apiVersion:"v1",kind:"List",items:[
+    {metadata:{name:"daily-prod",namespace:"kasten-io"},spec:{retention:{daily:2}}},
+    {metadata:{name:"weekly-dev",namespace:"kasten-io"},spec:{retention:{daily:1,weekly:4}}},
+    {metadata:{name:"yearly-p",namespace:"kasten-io"},spec:{retention:{yearly:1}}},
+    {metadata:{name:"bare",namespace:"kasten-io"},spec:{retention:null}}]}' \
+    > "$WORK/fixtures/policies_ret.json"
+  jq -n --argjson d '{"0":0,"10":10,"30":30,"40":40,"100":100,"400":400}' '
+    def ts($n): (now - ($n * 86400)) | todate;
+    def rp($n; $pol; $age; $run):
+      { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
+        metadata:{ name:$n, creationTimestamp:ts($age),
+          labels:( { "k10.kasten.io/appName":"hzapp",
+                     "k10.kasten.io/appNamespace":"prod" }
+                   + (if $pol == "" then {} else {"k10.kasten.io/policyName":$pol} end)
+                   + (if $run then {"k10.kasten.io/isRunNow":"true"} else {} end) ) },
+        spec:null,
+        status:{ state:"Bound", actionTime:ts($age),
+                 restorePointRef:{name:("rp-"+$n),namespace:"prod"} } };
+    {apiVersion:"v1",kind:"List",items:[
+      rp("rpc-hz-recent";     "daily-prod";  0;   false),
+      rp("rpc-hz-daily-out";  "daily-prod";  10;  false),
+      rp("rpc-hz-weekly-in";  "weekly-dev";  30;  false),
+      rp("rpc-hz-weekly-out"; "weekly-dev";  40;  false),
+      rp("rpc-hz-yearly-in";  "yearly-p";    400; false),
+      rp("rpc-hz-bare";       "bare";        100; false),
+      rp("rpc-hz-manual";     "daily-prod";  30;  true),
+      rp("rpc-hz-ondemand";   "";            30;  false),
+      rp("rpc-hz-gone";       "gone-policy"; 30;  false)]}' \
+    > "$WORK/fixtures/rpc_horizon.json"
+
   # "gone-policy" is deliberately absent from this list
   jq -n '{apiVersion:"v1",kind:"List",items:[
-    {metadata:{name:"daily-prod",namespace:"kasten-io"}},
+    {metadata:{name:"daily-prod",namespace:"kasten-io"},spec:{retention:{daily:2}}},
     {metadata:{name:"weekly-dev",namespace:"kasten-io"}}]}' > "$WORK/fixtures/policies.json"
 
   jq -n '{apiVersion:"v1",kind:"List",items:[
@@ -711,6 +744,21 @@ assert_eq "1" "$(grep -c 'manual runs with no expiration.*: 1, of which 1 candid
   "the summary counts exactly the manual run with no expiration"
 # flag only: same candidates as before the flag existed
 assert_eq "rpc-rn-manual-dated rpc-rn-manual-unlim rpc-rn-scheduled" "$(candidates)" "the flag does not change the candidate list"
+
+head_ "Case 34: a N/A snapshot is released only beyond the retention horizon of its policy"
+reset_reports
+RPC_FIXTURE=rpc_horizon.json POLICY_FIXTURE=policies_ret.json run -d 1 --require-unbound --orphan-policy-only || true
+assert_eq "" "$(candidates)" "without the flag nothing is released in conservative mode"
+reset_reports
+RPC_FIXTURE=rpc_horizon.json POLICY_FIXTURE=policies_ret.json run -d 1 --require-unbound --orphan-policy-only --include-no-expiry || true
+assert_eq "rpc-hz-daily-out rpc-hz-gone rpc-hz-manual rpc-hz-ondemand rpc-hz-weekly-out" "$(candidates)" \
+  "only the snapshots past their horizon, the manual, the on-demand and the policy-less are released"
+assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-weekly-in)" "a N/A inside its weekly horizon is healthy and kept"
+assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-yearly-in)" "a N/A inside its yearly horizon is kept"
+assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-bare)"      "a policy with no retention gives no horizon, so it is kept"
+assert_eq "3"    "$(jq -r 'select(.name=="rpc-hz-daily-out")  | .policyHorizonDays' "$(latest_report)")" "daily:2 gives a 3 day horizon"
+assert_eq "35"   "$(jq -r 'select(.name=="rpc-hz-weekly-out") | .policyHorizonDays' "$(latest_report)")" "weekly:4 gives a 35 day horizon"
+assert_eq "null" "$(jq -r 'select(.name=="rpc-hz-bare")       | .policyHorizonDays' "$(latest_report)")" "no retention means no horizon"
 
 # --------------------------------- Summary -----------------------------------
 printf '\n\033[1mSummary: %d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"

@@ -308,6 +308,20 @@ fetch_data() {
   log "Collecting K10 policies in '$K10_NAMESPACE'..."
   if "$CLI" -n "$K10_NAMESPACE" get "$POLICY_CRD" -o json > "$WORKDIR/policies.json" 2>/dev/null; then
     jq '[.items[].metadata.name]' "$WORKDIR/policies.json" > "$WORKDIR/policy_names.json"
+    # Retention horizon per policy, in days: how long the policy can legitimately
+    # keep a scheduled snapshot. Observed on K10 9.0.3: spec.retention holds a
+    # count per tier. Horizon = (largest tier count + 1) * tier period, the extra
+    # period being slack. No usable retention gives null, meaning unknown.
+    # [unverified] in the Kasten documentation and on 8.5.x.
+    jq 'def tier($r; $k; $p):
+          if (($r[$k] | type) == "number") and $r[$k] > 0 then ($r[$k] + 1) * $p else empty end;
+        [ .items[]
+          | (.spec.retention | if type == "object" then . else {} end) as $r
+          | { key: .metadata.name,
+              value: ( [ tier($r; "hourly"; 1/24), tier($r; "daily"; 1), tier($r; "weekly"; 7),
+                         tier($r; "monthly"; 31), tier($r; "yearly"; 366) ]
+                       | if length == 0 then null else max end ) } ]
+        | from_entries' "$WORKDIR/policies.json" > "$WORKDIR/policy_horizons.json"
     POLICY_COUNT="$(jq 'length' "$WORKDIR/policy_names.json")"
     log "$POLICY_COUNT active policies"
     # Zero policies makes --orphan-policy-only inoperative: with no reference
@@ -321,6 +335,7 @@ fetch_data() {
     fi
   else
     echo 'null' > "$WORKDIR/policy_names.json"
+    echo '{}' > "$WORKDIR/policy_horizons.json"
     # The filter is restrictive: dropping it would widen the deletion scope.
     # Abort rather than degrade silently.
     if [[ $ORPHAN_POLICY_ONLY -eq 1 ]]; then
@@ -348,6 +363,7 @@ evaluate() {
 
   jq -c \
     --argjson policies "$(<"$WORKDIR/policy_names.json")" \
+    --argjson horizons "$(<"$WORKDIR/policy_horizons.json")" \
     --argjson excludeNs "$ex_ns" \
     --argjson includeNs "$in_ns" \
     --argjson excludePol "$ex_pol" \
@@ -457,6 +473,16 @@ evaluate() {
         | .policyExists = (if .policyName == "" then false
                            elif $policies == null then true
                            else (.policyName as $p | ($policies | index($p)) != null) end)
+        # A scheduled snapshot with no expiry is healthy while it sits inside
+        # what its policy retention can produce. It is eligible for
+        # --include-no-expiry only beyond that horizon. A manual run, an
+        # on-demand one and one whose policy is gone have no retention to
+        # compare against. An unknown horizon is never eligible.
+        | .policyHorizonDays = (if .policyName == "" then null
+                                else ($horizons[.policyName] // null) end)
+        | .noExpiryEligible = (if .runNow or .policyName == "" or (.policyExists | not) then true
+                               else (.policyHorizonDays != null and .ageDays != null
+                                     and .ageDays > .policyHorizonDays) end)
       ]
     # rank per application, newest to oldest, over the eligible scope only
     | ( [ .[] | select(.kind == "snapshot" or $includeExports == 1) ]
@@ -492,11 +518,11 @@ evaluate() {
           # and below still applies.
           elif $requireUnbound == 1 and .state != "Unbound"
                and (($includeNoExpiry == 1 and .expiryState == "none"
-                     and .policyName != $drPolicy) | not) then
+                     and .policyName != $drPolicy and .noExpiryEligible) | not) then
             {decision: "KEEP", reason: "still-bound-to-application"}
           elif $orphanPolicyOnly == 1 and .policyExists
                and (($includeNoExpiry == 1 and .expiryState == "none"
-                     and .policyName != $drPolicy) | not) then
+                     and .policyName != $drPolicy and .noExpiryEligible) | not) then
             {decision: "KEEP", reason: "policy-still-active"}
           else
             {decision: "DELETE",
