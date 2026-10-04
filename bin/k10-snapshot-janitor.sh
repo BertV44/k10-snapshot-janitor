@@ -80,6 +80,8 @@ REQUIRE_UNBOUND=0         # 1 = only target RPC whose application is gone
 ORPHAN_POLICY_ONLY=0      # 1 = only target RPC with no policy, or a deleted one
 POLICY_COUNT="?"          # K10 policies read, "?" if the read failed
 OVER_CAP=0                # 1 = candidates beyond --max-deletions
+NO_EXPIRY=0               # local snapshots with no spec.expiresAt (flag only)
+NO_EXPIRY_CAND=0          # of which deletion candidates
 CANDIDATE_BYTES=0         # physical size reported for the deletion candidates
 SIZE_UNKNOWN=0            # candidates with no usable physicalSizeBytes
 INCLUDE_EXPORTS=0         # 1 = also include exported restore points (discouraged)
@@ -386,6 +388,11 @@ evaluate() {
             actionTime:    (.status.actionTime // null),
             scheduledTime: (.status.scheduledTime // null),
             created:       .metadata.creationTimestamp,
+            # Informational only, never an input to the decision. Whether
+            # "no expiry" is an absent field, null or an empty string is
+            # [unverified]: all three read as none. Any other non-date string
+            # (for example the UI label N/A) reads as unparseable.
+            expiresAt:     (if (.spec.expiresAt | type) == "string" then .spec.expiresAt else "" end),
             # Absent, null, non-numeric and negative all count as "unknown",
             # never as a real zero. Keeping a string out of the sum also
             # matters because jq add concatenates strings instead of failing.
@@ -407,6 +414,9 @@ evaluate() {
         # reference timestamp: actionTime > scheduledTime > creationTimestamp
         | .refTime = (.actionTime // .scheduledTime // .created)
         | .refEpoch = (.refTime | to_epoch)
+        | .expiryState = (if .expiresAt == "" then "none"
+                          elif (.expiresAt | to_epoch) == null then "unparseable"
+                          else "set" end)
         | .ageDays  = (if .refEpoch == null then null
                        else (($NOW - .refEpoch) / 86400 * 100 | floor) / 100 end)
         # Discriminator = label PRESENCE, not its value. Kubernetes allows an
@@ -477,14 +487,15 @@ write_reports() {
   cp "$WORKDIR/decisions.jsonl" "$REPORT_JSONL"
 
   {
-    printf 'run_id,decision,reason,rpc_name,state,app_namespace,app_name,app_type,policy_name,policy_exists,on_demand,kind,ref_time,age_days,rank,logical_bytes,physical_bytes,restorepoint\n'
+    printf 'run_id,decision,reason,rpc_name,state,app_namespace,app_name,app_type,policy_name,policy_exists,on_demand,kind,ref_time,age_days,rank,logical_bytes,physical_bytes,restorepoint,expires_at,expiry_state\n'
     jq -r '[
         .runId, .decision, .reason, .name, .state, .appNamespace, .appName, .appType,
         .policyName, (.policyExists|tostring), (.onDemand|tostring), .kind,
         (.refTime // ""), ((.ageDays // "")|tostring), (.rank|tostring),
         (if .hasLogicalSize  then (.logicalSizeBytes|tostring)  else "" end),
         (if .hasPhysicalSize then (.physicalSizeBytes|tostring) else "" end),
-        (if .rpNamespace == "" then "" else .rpNamespace + "/" + .rpName end)
+        (if .rpNamespace == "" then "" else .rpNamespace + "/" + .rpName end),
+        .expiresAt, .expiryState
       ] | @csv' "$WORKDIR/decisions.jsonl"
   } > "$REPORT_CSV"
 
@@ -500,6 +511,8 @@ summarize() {
   EXPORTS=$(jq -r 'select(.kind=="export") | .name' "$WORKDIR/decisions.jsonl" | wc -l | tr -d ' ')
   CANDIDATE_BYTES=$(jq -s '[.[] | select(.decision=="DELETE" and .hasPhysicalSize)
                             | .physicalSizeBytes] | add // 0' "$WORKDIR/decisions.jsonl")
+  NO_EXPIRY=$(jq -s '[.[] | select(.kind=="snapshot" and .expiryState=="none")] | length' "$WORKDIR/decisions.jsonl")
+  NO_EXPIRY_CAND=$(jq -s '[.[] | select(.kind=="snapshot" and .expiryState=="none" and .decision=="DELETE")] | length' "$WORKDIR/decisions.jsonl")
   SIZE_UNKNOWN=$(jq -s '[.[] | select(.decision=="DELETE" and (.hasPhysicalSize | not))]
                         | length' "$WORKDIR/decisions.jsonl")
 
@@ -522,6 +535,7 @@ summarize() {
     echo "   of which exports (never purged): $EXPORTS"
     echo " Deletion candidates              : $CANDIDATES"
     echo " Candidate physical size          : $CANDIDATE_BYTES bytes$([[ $SIZE_UNKNOWN -gt 0 ]] && echo " ($SIZE_UNKNOWN candidate(s) with unknown size)" || echo '')"
+    echo " Snapshots with no expiry (flag only, GC never reclaims them) : $NO_EXPIRY, of which $NO_EXPIRY_CAND candidate(s)"
     echo "--------------------------------------------------------------"
     echo " KEEP decisions by reason:"
     # Aggregated in jq rather than 'sort | uniq -c | sort -rn | sed': that
@@ -579,6 +593,9 @@ k10_janitor_candidate_physical_bytes $CANDIDATE_BYTES
 # HELP k10_janitor_candidate_size_unknown_total Deletion candidates whose physicalSizeBytes is absent or not numeric.
 # TYPE k10_janitor_candidate_size_unknown_total gauge
 k10_janitor_candidate_size_unknown_total $SIZE_UNKNOWN
+# HELP k10_janitor_no_expiry_snapshots_total Local snapshots with no expiry date. Informational, does not change any decision.
+# TYPE k10_janitor_no_expiry_snapshots_total gauge
+k10_janitor_no_expiry_snapshots_total $NO_EXPIRY
 EOF
   then
     warn "Cannot write metrics: $tmp"

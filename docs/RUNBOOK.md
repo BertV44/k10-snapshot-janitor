@@ -75,7 +75,7 @@ This script covers what the GC does not: restore points it will never reclaim
 because no expiry is set or because retention is explicitly unlimited, those
 from deleted policies, and those of applications removed from the cluster.
 
-The script does not read `spec.expiresAt` today. If it ever does, the safe rule
+The script reads `spec.expiresAt` for **flagging only**, never for a decision. `expiry_state` is `none` (absent, null or empty), `set` (a parsable date) or `unparseable` (any other string). The summary, the CSV/JSONL and `k10_janitor_no_expiry_snapshots_total` expose it, so snapshots the GC will never reclaim are visible, on-demand or policy-created alike. `N/A` and `No Expiration` cannot be told apart yet: **[unverified]**, **[validate in a lab]**. A deletion rule based on the expiry would widen the scope and needs a separate opt-in. If one is ever added, the safe rule
 is the one already applied to timestamps: **anything that is not a parsable
 date resolves to `KEEP`**. That holds whichever representation turns out to be
 the real one.
@@ -118,7 +118,7 @@ oc label restorepointcontents.apps.kio.kasten.io <name> k10-janitor/exempt=true
 
 Every run writes four timestamped files per `run_id` into `--report-dir`, the last one only under `--apply`:
 
-- `k10-janitor-<run_id>.csv`: one line per inventoried `RestorePointContent`, with `decision`, `reason`, age, application, policy, sizes and rank
+- `k10-janitor-<run_id>.csv`: one line per inventoried `RestorePointContent`, with `decision`, `reason`, age, application, policy, sizes, rank, `expires_at` and `expiry_state`
 - `k10-janitor-<run_id>.jsonl`: the same content as JSON Lines, consumable by `jq` or a SIEM ingest
 - `k10-janitor-<run_id>.summary.txt`: readable synthesis, including the breakdown of KEEP reasons
 - `k10-janitor-<run_id>.jsonl.audit`: produced only under `--apply`, one line per deletion with `deletedAt` and `deleteResult`
@@ -138,6 +138,7 @@ k10_janitor_candidate_physical_bytes
 k10_janitor_candidate_size_unknown_total
 k10_janitor_deleted_total
 k10_janitor_failed_total
+k10_janitor_no_expiry_snapshots_total
 ```
 
 [unverified] The textfile collector is not directly usable from a CronJob pod without node-exporter mounted on the same volume. For a Grafana dashboard, the simplest options are a Pushgateway or a sidecar scraping the PVC. To be decided against the customer monitoring stack.

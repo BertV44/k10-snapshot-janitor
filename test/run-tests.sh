@@ -167,6 +167,27 @@ build_fixtures() {
         logicalSizeBytes:0, physicalSizeBytes:0, restorePointRef:null } }]}' \
     > "$WORK/fixtures/rpc_ts_numeric.json"
 
+  # Expiry states. The representation of "no expiry" in spec.expiresAt is not
+  # verified against the API, so four shapes are covered: absent, empty,
+  # a real date, and a non-date string such as the UI "N/A".
+  jq -n --arg a "$(ago 30)" --arg b "$(ago 1)" '
+    def rp($n; $app; $pol; $ts; $spec):
+      { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
+        metadata:{ name:$n, creationTimestamp:$ts,
+          labels:( { "k10.kasten.io/appName":$app,
+                     "k10.kasten.io/appNamespace":"prod" }
+                   + (if $pol == "" then {} else {"k10.kasten.io/policyName":$pol} end) ) },
+        spec:$spec,
+        status:{ state:"Bound", actionTime:$ts,
+                 restorePointRef:{name:("rp-"+$n),namespace:"prod"} } };
+    {apiVersion:"v1",kind:"List",items:[
+      rp("rpc-exp-recent";   "expapp"; "daily-prod"; $b; {}),
+      rp("rpc-exp-absent";   "expapp"; "daily-prod"; $a; {}),
+      rp("rpc-exp-empty";    "expapp"; "";           $a; {expiresAt:""}),
+      rp("rpc-exp-date";     "expapp"; "daily-prod"; $a; {expiresAt:"2999-01-01T00:00:00Z"}),
+      rp("rpc-exp-na";       "expapp"; "daily-prod"; $a; {expiresAt:"N/A"})]}' \
+    > "$WORK/fixtures/rpc_expiry.json"
+
   # "gone-policy" is deliberately absent from this list
   jq -n '{apiVersion:"v1",kind:"List",items:[
     {metadata:{name:"daily-prod",namespace:"kasten-io"}},
@@ -496,7 +517,7 @@ head_ "Case 23: --metrics-file (issue #7)"
 reset_reports
 rm -f "$WORK/metrics.prom"
 run -d 7 --exclude-namespace protected --metrics-file "$WORK/metrics.prom" || true
-assert_eq "10" "$(grep -c '^k10_janitor_' "$WORK/metrics.prom" 2>/dev/null || echo 0)" "10 metrics written"
+assert_eq "11" "$(grep -c '^k10_janitor_' "$WORK/metrics.prom" 2>/dev/null || echo 0)" "11 metrics written"
 assert_eq "5" "$(awk '/^k10_janitor_candidates_total /{print $2}' "$WORK/metrics.prom" 2>/dev/null)" "candidates_total consistent with the report"
 assert_eq "1" "$(awk '/^k10_janitor_dry_run /{print $2}' "$WORK/metrics.prom" 2>/dev/null)" "dry_run flagged"
 
@@ -571,6 +592,22 @@ reset_reports
 run -d 7 --exclude-namespace protected || true
 assert_eq "0" "$(grep -c 'unknown size' "$WORK"/reports/*.summary.txt || true)" \
   "no mention when every candidate reports a size"
+
+head_ "Case 31: restore points with no expiry are flagged, decisions unchanged"
+reset_reports
+rm -f "$WORK/expiry.prom"
+RPC_FIXTURE=rpc_expiry.json run -d 7 --metrics-file "$WORK/expiry.prom" || true
+assert_eq "none"        "$(jq -r 'select(.name=="rpc-exp-absent") | .expiryState' "$(latest_report)")" "absent expiresAt is flagged none"
+assert_eq "none"        "$(jq -r 'select(.name=="rpc-exp-empty")  | .expiryState' "$(latest_report)")" "empty expiresAt is flagged none"
+assert_eq "set"         "$(jq -r 'select(.name=="rpc-exp-date")   | .expiryState' "$(latest_report)")" "a parsable date is flagged set"
+assert_eq "unparseable" "$(jq -r 'select(.name=="rpc-exp-na")     | .expiryState' "$(latest_report)")" "a non-date string is flagged unparseable"
+assert_eq "none"        "$(csv_field rpc-exp-absent expiry_state)" "the CSV carries the expiry state"
+# flag only: the decisions are exactly what they were without the flag
+assert_eq "rpc-exp-absent rpc-exp-date rpc-exp-empty rpc-exp-na" "$(candidates)" "the flag does not change the candidate list"
+assert_eq "KEEP within-retention" "$(decision_of rpc-exp-recent)" "the recent point is still kept"
+assert_eq "3" "$(awk '/^k10_janitor_no_expiry_snapshots_total /{print $2}' "$WORK/expiry.prom" 2>/dev/null)" \
+  "the metric counts the no-expiry snapshots"
+assert_eq "1" "$(grep -c 'no expiry' "$WORK"/reports/*.summary.txt || true)" "the summary mentions the no-expiry snapshots"
 
 # --------------------------------- Summary -----------------------------------
 printf '\n\033[1mSummary: %d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"
