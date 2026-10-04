@@ -191,8 +191,9 @@ build_fixtures() {
       rp("rpc-exp-na";       "expapp"; "daily-prod"; $a; "N-A")]}' \
     > "$WORK/fixtures/rpc_expiry.json"
 
-  # --include-no-expiry: the on-demand snapshot with no expiry is the only
-  # class it may release from --require-unbound. Everything else must hold.
+  # --include-no-expiry releases snapshots with no expiry (on-demand or created
+  # by a policy) from --require-unbound and --orphan-policy-only. Everything
+  # else must hold: dated or unparsable expiry, exemption, exports, min-keep.
   jq -n --arg a "$(ago 30)" --arg b "$(ago 1)" '
     def rp($n; $pol; $ts; $exp; $exempt; $export):
       { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
@@ -636,25 +637,35 @@ assert_eq "rpc-exp-absent rpc-exp-colon rpc-exp-date rpc-exp-empty rpc-exp-na" "
 assert_eq "KEEP within-retention" "$(decision_of rpc-exp-recent)" "the recent point is still kept"
 assert_eq "3" "$(awk '/^k10_janitor_no_expiry_snapshots_total /{print $2}' "$WORK/expiry.prom" 2>/dev/null)" \
   "the metric counts the no-expiry snapshots"
-assert_eq "1" "$(grep -c 'no expiry' "$WORK"/reports/*.summary.txt || true)" "the summary mentions the no-expiry snapshots"
+assert_eq "1" "$(grep -c 'Snapshots with no expiry' "$WORK"/reports/*.summary.txt || true)" "the summary mentions the no-expiry snapshots"
 
-head_ "Case 32: --include-no-expiry releases only on-demand snapshots with no expiry"
+head_ "Case 32: --include-no-expiry releases snapshots with no expiry, on-demand or policy"
 reset_reports
 RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --require-unbound --orphan-policy-only || true
 assert_eq "" "$(candidates)" "without the flag the conservative mode deletes none of them"
 reset_reports
 RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --require-unbound --orphan-policy-only --include-no-expiry || true
-assert_eq "rpc-nx-target" "$(candidates)" "with the flag, only the on-demand no-expiry snapshot is a candidate"
+assert_eq "rpc-nx-policy rpc-nx-target" "$(candidates)" "with the flag, the no-expiry snapshots are candidates, on-demand or policy"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-dated)"     "a dated expiry is still protected"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-badexpiry)" "an unparsable expiry is still protected"
-assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-policy)"    "a policy-created snapshot is still protected"
 assert_eq "KEEP labelled-exempt"            "$(decision_of rpc-nx-exempt)"    "the exemption label still wins"
 assert_eq "KEEP export-restorepoint"        "$(decision_of rpc-nx-export)"    "an export is still never deleted"
 assert_eq "KEEP within-retention"           "$(decision_of rpc-nx-recent)"    "the recent point is still kept"
 reset_reports
 RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --require-unbound --orphan-policy-only --include-no-expiry --apply && rc=0 || rc=$?
 assert_eq "0" "$rc" "exit code 0 under --apply"
-assert_eq "rpc-nx-target" "$(sed 's/.* //' "$WORK/deleted.log" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')" "--apply deletes that one object only"
+assert_eq "rpc-nx-policy rpc-nx-target" "$(sed 's/.* //' "$WORK/deleted.log" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')" "--apply deletes those two objects only"
+# --orphan-policy-only alone: an active policy normally protects its snapshots
+reset_reports
+RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --orphan-policy-only || true
+assert_eq "KEEP policy-still-active" "$(decision_of rpc-nx-policy)" "without the flag an active policy protects its snapshot"
+reset_reports
+RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --orphan-policy-only --include-no-expiry || true
+assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-nx-policy)" "with the flag, a no-expiry policy snapshot is released"
+# detection: counted in the summary even when a guard keeps them
+reset_reports
+RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --require-unbound --orphan-policy-only || true
+assert_eq "1" "$(grep -c 'past retention but protected' "$WORK"/reports/*.summary.txt || true)" "the summary reports no-expiry snapshots kept by a guard"
 
 # --------------------------------- Summary -----------------------------------
 printf '\n\033[1mSummary: %d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"

@@ -83,9 +83,10 @@ POLICY_COUNT="?"          # K10 policies read, "?" if the read failed
 OVER_CAP=0                # 1 = candidates beyond --max-deletions
 NO_EXPIRY=0               # local snapshots with no expiresAt label (flag only)
 NO_EXPIRY_CAND=0          # of which deletion candidates
+NO_EXPIRY_KEPT=0          # of which past retention but kept by a guard
 CANDIDATE_BYTES=0         # physical size reported for the deletion candidates
 SIZE_UNKNOWN=0            # candidates with no usable physicalSizeBytes
-INCLUDE_NO_EXPIRY=0      # 1 = on-demand snapshots with no expiry escape --require-unbound
+INCLUDE_NO_EXPIRY=0      # 1 = snapshots with no expiry escape --require-unbound and --orphan-policy-only
 INCLUDE_EXPORTS=0         # 1 = also include exported restore points (discouraged)
 WAIT_RETIRE=0             # seconds to wait for RetireActions to complete
 REPORT_DIR="${REPORT_DIR:-./k10-janitor-reports}"
@@ -136,9 +137,11 @@ SELECTION
       --orphan-policy-only   Only target RPC with no $LBL_POLICY label,
                              or whose referenced policy no longer exists
       --include-exports      Also include exported restore points (DISCOURAGED)
-      --include-no-expiry    With --require-unbound, also target on-demand snapshots
-                             (no policy label) that carry no expiry. Policy-created
-                             and dated ones stay protected. Not used by the CronJob
+      --include-no-expiry    Also target snapshots that carry no expiry label, whether
+                             on-demand or created by a policy, even when
+                             --require-unbound or --orphan-policy-only would protect
+                             them. Dated ones stay protected. A policy GFS point
+                             may have no expiry: use with care. Not used by the CronJob
       --include-namespace NS Restrict to this application namespace (repeatable)
       --exclude-namespace NS Exclude this application namespace (repeatable)
       --exclude-policy NAME  Exclude RPC created by this policy (repeatable)
@@ -470,13 +473,14 @@ evaluate() {
             {decision: "KEEP", reason: "within-retention"}
           elif .rank >= 0 and .rank < $minKeep then
             {decision: "KEEP", reason: "min-keep-guard"}
-          # --include-no-expiry only relaxes this one guard, and only for an
-          # on-demand snapshot with no expiry. It adds no DELETE branch: every
-          # other guard above and below still applies.
+          # --include-no-expiry only relaxes these two guards, and only for a
+          # snapshot with no expiry. It adds no DELETE branch: every other
+          # guard above and below still applies.
           elif $requireUnbound == 1 and .state != "Unbound"
-               and (($includeNoExpiry == 1 and .onDemand and .expiryState == "none") | not) then
+               and (($includeNoExpiry == 1 and .expiryState == "none") | not) then
             {decision: "KEEP", reason: "still-bound-to-application"}
-          elif $orphanPolicyOnly == 1 and .policyExists then
+          elif $orphanPolicyOnly == 1 and .policyExists
+               and (($includeNoExpiry == 1 and .expiryState == "none") | not) then
             {decision: "KEEP", reason: "policy-still-active"}
           else
             {decision: "DELETE",
@@ -529,6 +533,9 @@ summarize() {
                             | .physicalSizeBytes] | add // 0' "$WORKDIR/decisions.jsonl")
   NO_EXPIRY=$(jq -s '[.[] | select(.kind=="snapshot" and .expiryState=="none")] | length' "$WORKDIR/decisions.jsonl")
   NO_EXPIRY_CAND=$(jq -s '[.[] | select(.kind=="snapshot" and .expiryState=="none" and .decision=="DELETE")] | length' "$WORKDIR/decisions.jsonl")
+  NO_EXPIRY_KEPT=$(jq -s --argjson r "$RETENTION_DAYS" '[.[] | select(.kind=="snapshot" and .expiryState=="none"
+                           and .decision=="KEEP" and .ageDays != null
+                           and .ageDays > $r)] | length' "$WORKDIR/decisions.jsonl")
   SIZE_UNKNOWN=$(jq -s '[.[] | select(.decision=="DELETE" and (.hasPhysicalSize | not))]
                         | length' "$WORKDIR/decisions.jsonl")
 
@@ -552,7 +559,8 @@ summarize() {
     echo "   of which exports (never purged): $EXPORTS"
     echo " Deletion candidates              : $CANDIDATES"
     echo " Candidate physical size          : $CANDIDATE_BYTES bytes$([[ $SIZE_UNKNOWN -gt 0 ]] && echo " ($SIZE_UNKNOWN candidate(s) with unknown size)" || echo '')"
-    echo " Snapshots with no expiry (flag only)                         : $NO_EXPIRY, of which $NO_EXPIRY_CAND candidate(s)"
+    echo " Snapshots with no expiry                                     : $NO_EXPIRY, of which $NO_EXPIRY_CAND candidate(s)"
+    echo "   no expiry, past retention but protected by a guard           : $NO_EXPIRY_KEPT"
     echo "--------------------------------------------------------------"
     echo " KEEP decisions by reason:"
     # Aggregated in jq rather than 'sort | uniq -c | sort -rn | sed': that
