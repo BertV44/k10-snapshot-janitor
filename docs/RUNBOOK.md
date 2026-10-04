@@ -95,6 +95,10 @@ the real one.
 
 The conservative mode corresponds to `CONSERVATIVE_MODE: "true"` in the ConfigMap.
 
+### Opt-in: `--include-no-expiry`
+
+Meaningful only with `--require-unbound`, which otherwise protects every snapshot whose application still exists. With this flag, a snapshot is also targeted when **all** of these hold: it has no `k10.kasten.io/policyName` label (on-demand), it carries no `k10.kasten.io/expiresAt` label, and it is past `--retention-days` and outside the `--min-keep` guard. A dated expiry, an unparsable one, a policy-created snapshot, the exemption label and every export stay protected. The `CronJob` does not use it, and it is off by default. A snapshot created by a policy run is **not** covered even when it shows `N/A` in the UI. **[unverified]** On K10 9.0.3 a lab held no on-demand snapshot, so the on-demand shape (no policy label) is a deduction, **[validate in a lab]** before an `--apply`.
+
 ## 3. Guards
 
 | Guard | Behaviour |

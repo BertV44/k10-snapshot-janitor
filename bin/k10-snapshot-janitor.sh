@@ -85,6 +85,7 @@ NO_EXPIRY=0               # local snapshots with no expiresAt label (flag only)
 NO_EXPIRY_CAND=0          # of which deletion candidates
 CANDIDATE_BYTES=0         # physical size reported for the deletion candidates
 SIZE_UNKNOWN=0            # candidates with no usable physicalSizeBytes
+INCLUDE_NO_EXPIRY=0      # 1 = on-demand snapshots with no expiry escape --require-unbound
 INCLUDE_EXPORTS=0         # 1 = also include exported restore points (discouraged)
 WAIT_RETIRE=0             # seconds to wait for RetireActions to complete
 REPORT_DIR="${REPORT_DIR:-./k10-janitor-reports}"
@@ -135,6 +136,9 @@ SELECTION
       --orphan-policy-only   Only target RPC with no $LBL_POLICY label,
                              or whose referenced policy no longer exists
       --include-exports      Also include exported restore points (DISCOURAGED)
+      --include-no-expiry    With --require-unbound, also target on-demand snapshots
+                             (no policy label) that carry no expiry. Policy-created
+                             and dated ones stay protected. Not used by the CronJob
       --include-namespace NS Restrict to this application namespace (repeatable)
       --exclude-namespace NS Exclude this application namespace (repeatable)
       --exclude-policy NAME  Exclude RPC created by this policy (repeatable)
@@ -205,6 +209,7 @@ while [[ $# -gt 0 ]]; do
     --require-unbound)     REQUIRE_UNBOUND=1; shift ;;
     --orphan-policy-only)  ORPHAN_POLICY_ONLY=1; shift ;;
     --include-exports)     INCLUDE_EXPORTS=1; shift ;;
+    --include-no-expiry)   INCLUDE_NO_EXPIRY=1; shift ;;
     --apply)               DRY_RUN=0; shift ;;
     --dry-run)             DRY_RUN=1; shift ;;
     -q|--quiet)            QUIET=1; shift ;;
@@ -342,6 +347,7 @@ evaluate() {
     --argjson requireUnbound "$REQUIRE_UNBOUND" \
     --argjson orphanPolicyOnly "$ORPHAN_POLICY_ONLY" \
     --argjson includeExports "$INCLUDE_EXPORTS" \
+    --argjson includeNoExpiry "$INCLUDE_NO_EXPIRY" \
     --arg lblExport "$LBL_EXPORT" \
     --arg lblApp "$LBL_APP" \
     --arg lblNs "$LBL_NS" \
@@ -464,7 +470,11 @@ evaluate() {
             {decision: "KEEP", reason: "within-retention"}
           elif .rank >= 0 and .rank < $minKeep then
             {decision: "KEEP", reason: "min-keep-guard"}
-          elif $requireUnbound == 1 and .state != "Unbound" then
+          # --include-no-expiry only relaxes this one guard, and only for an
+          # on-demand snapshot with no expiry. It adds no DELETE branch: every
+          # other guard above and below still applies.
+          elif $requireUnbound == 1 and .state != "Unbound"
+               and (($includeNoExpiry == 1 and .onDemand and .expiryState == "none") | not) then
             {decision: "KEEP", reason: "still-bound-to-application"}
           elif $orphanPolicyOnly == 1 and .policyExists then
             {decision: "KEEP", reason: "policy-still-active"}
@@ -534,6 +544,7 @@ summarize() {
     echo " max-deletions     : $([[ $MAX_DELETIONS -eq 0 ]] && echo 'unlimited' || echo "$MAX_DELETIONS")$([[ $OVER_CAP -eq 1 ]] && echo "  (OVER CAP: $CANDIDATES candidates, an --apply would be refused)" || echo '')"
     echo " require-unbound   : $REQUIRE_UNBOUND"
     echo " orphan-policy-only: $ORPHAN_POLICY_ONLY"
+    echo " include-no-expiry : $INCLUDE_NO_EXPIRY"
     echo " K10 policies read : $POLICY_COUNT"
     echo "--------------------------------------------------------------"
     echo " RestorePointContents inventoried : $TOTAL"
