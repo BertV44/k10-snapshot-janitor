@@ -247,7 +247,9 @@ build_fixtures() {
     {metadata:{name:"daily-prod",namespace:"kasten-io"},spec:{retention:{daily:2}}},
     {metadata:{name:"weekly-dev",namespace:"kasten-io"},spec:{retention:{daily:1,weekly:4}}},
     {metadata:{name:"yearly-p",namespace:"kasten-io"},spec:{retention:{yearly:1}}},
-    {metadata:{name:"bare",namespace:"kasten-io"},spec:{retention:null}}]}' \
+    {metadata:{name:"bare",namespace:"kasten-io"},spec:{retention:null}},
+    {metadata:{name:"paused-p",namespace:"kasten-io"},spec:{retention:{daily:2},paused:true}},
+    {metadata:{name:"running-p",namespace:"kasten-io"},spec:{retention:{daily:2},paused:false}}]}' \
     > "$WORK/fixtures/policies_ret.json"
   jq -n --argjson d '{"0":0,"10":10,"30":30,"40":40,"100":100,"400":400}' '
     def ts($n): (now - ($n * 86400)) | todate;
@@ -270,7 +272,9 @@ build_fixtures() {
       rp("rpc-hz-bare";       "bare";        100; false),
       rp("rpc-hz-manual";     "daily-prod";  30;  true),
       rp("rpc-hz-ondemand";   "";            30;  false),
-      rp("rpc-hz-gone";       "gone-policy"; 30;  false)]}' \
+      rp("rpc-hz-gone";       "gone-policy"; 30;  false),
+      rp("rpc-hz-paused";     "paused-p";    40;  false),
+      rp("rpc-hz-running";    "running-p";   40;  false)]}' \
     > "$WORK/fixtures/rpc_horizon.json"
 
   # "gone-policy" is deliberately absent from this list
@@ -751,11 +755,13 @@ RPC_FIXTURE=rpc_horizon.json POLICY_FIXTURE=policies_ret.json run -d 1 --require
 assert_eq "" "$(candidates)" "without the flag nothing is released in conservative mode"
 reset_reports
 RPC_FIXTURE=rpc_horizon.json POLICY_FIXTURE=policies_ret.json run -d 1 --require-unbound --orphan-policy-only --include-no-expiry || true
-assert_eq "rpc-hz-daily-out rpc-hz-gone rpc-hz-manual rpc-hz-ondemand rpc-hz-weekly-out" "$(candidates)" \
+assert_eq "rpc-hz-daily-out rpc-hz-gone rpc-hz-manual rpc-hz-ondemand rpc-hz-running rpc-hz-weekly-out" "$(candidates)" \
   "only the snapshots past their horizon, the manual, the on-demand and the policy-less are released"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-weekly-in)" "a N/A inside its weekly horizon is healthy and kept"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-yearly-in)" "a N/A inside its yearly horizon is kept"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-bare)"      "a policy with no retention gives no horizon, so it is kept"
+assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-paused)" "a snapshot of a paused policy is not released: retention is not being applied"
+assert_eq "DELETE snapshot-past-threshold"  "$(decision_of rpc-hz-running)" "paused false behaves like a running policy"
 assert_eq "3"    "$(jq -r 'select(.name=="rpc-hz-daily-out")  | .policyHorizonDays' "$(latest_report)")" "daily:2 gives a 3 day horizon"
 assert_eq "35"   "$(jq -r 'select(.name=="rpc-hz-weekly-out") | .policyHorizonDays' "$(latest_report)")" "weekly:4 gives a 35 day horizon"
 assert_eq "null" "$(jq -r 'select(.name=="rpc-hz-bare")       | .policyHorizonDays' "$(latest_report)")" "no retention means no horizon"

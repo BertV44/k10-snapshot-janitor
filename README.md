@@ -65,7 +65,7 @@ reports them, and can retire them on a schedule.
 `--include-no-expiry` is an opt-in that also targets snapshots carrying no expiry
 label, on-demand or created by a policy, even when `--require-unbound` or
 `--orphan-policy-only` would protect them. A scheduled snapshot is released only once it is older than the retention
-horizon of its policy, so one a policy still legitimately keeps stays. Read the
+horizon of its policy, so one a policy still legitimately keeps stays, as does any snapshot of a paused policy. Read the
 dry-run first and use `--exclude-policy` for the policies to protect. The shipped CronJob
 never uses it.
 
@@ -113,7 +113,7 @@ procedure.
 ./test/run-tests.sh
 ```
 
-139 assertions, entirely offline: fixtures and a stub CLI are generated on the
+141 assertions, entirely offline: fixtures and a stub CLI are generated on the
 fly, no cluster is contacted. A skipped case is fatal — a suite that quietly
 runs at 97% is worse than one that fails, so `python3` and `pyyaml` are
 required for the manifest checks.

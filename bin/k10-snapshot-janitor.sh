@@ -311,16 +311,19 @@ fetch_data() {
     # Retention horizon per policy, in days: how long the policy can legitimately
     # keep a scheduled snapshot. Observed on K10 9.0.3: spec.retention holds a
     # count per tier. Horizon = (largest tier count + 1) * tier period, the extra
-    # period being slack. No usable retention gives null, meaning unknown.
+    # period being slack. No usable retention gives null, meaning unknown. So does
+    # a paused policy (spec.paused is a boolean in the policy CRD): it no longer
+    # applies its retention, so an old snapshot is not a leftover.
     # [unverified] in the Kasten documentation and on 8.5.x.
     jq 'def tier($r; $k; $p):
           if (($r[$k] | type) == "number") and $r[$k] > 0 then ($r[$k] + 1) * $p else empty end;
         [ .items[]
           | (.spec.retention | if type == "object" then . else {} end) as $r
           | { key: .metadata.name,
-              value: ( [ tier($r; "hourly"; 1/24), tier($r; "daily"; 1), tier($r; "weekly"; 7),
-                         tier($r; "monthly"; 31), tier($r; "yearly"; 366) ]
-                       | if length == 0 then null else max end ) } ]
+              value: ( if .spec.paused == true then null
+                       else [ tier($r; "hourly"; 1/24), tier($r; "daily"; 1), tier($r; "weekly"; 7),
+                              tier($r; "monthly"; 31), tier($r; "yearly"; 366) ]
+                            | if length == 0 then null else max end end ) } ]
         | from_entries' "$WORKDIR/policies.json" > "$WORKDIR/policy_horizons.json"
     POLICY_COUNT="$(jq 'length' "$WORKDIR/policy_names.json")"
     log "$POLICY_COUNT active policies"
