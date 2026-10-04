@@ -62,6 +62,7 @@ readonly LBL_POLICY="k10.kasten.io/policyName"
 readonly LBL_POLICY_NS="k10.kasten.io/policyNamespace"
 readonly LBL_RUN="k10.kasten.io/runActionName"
 readonly LBL_EXPIRES="k10.kasten.io/expiresAt"
+readonly LBL_RUNNOW="k10.kasten.io/isRunNow"
 # Exemption label key. Overridable through --exempt-label only, and
 # deliberately NOT from the environment: the CronJob mounts its ConfigMap with
 # envFrom, so any key added there becomes an environment variable. An
@@ -83,6 +84,8 @@ POLICY_COUNT="?"          # K10 policies read, "?" if the read failed
 OVER_CAP=0                # 1 = candidates beyond --max-deletions
 NO_EXPIRY=0               # local snapshots with no expiresAt label (flag only)
 NO_EXPIRY_CAND=0          # of which deletion candidates
+MANUAL_UNLIM=0           # manual runs (isRunNow) with no expiry label
+MANUAL_UNLIM_CAND=0       # of which deletion candidates
 NO_EXPIRY_KEPT=0          # of which past retention but kept by a guard
 CANDIDATE_BYTES=0         # physical size reported for the deletion candidates
 SIZE_UNKNOWN=0            # candidates with no usable physicalSizeBytes
@@ -359,6 +362,7 @@ evaluate() {
     --arg lblPolicyNs "$LBL_POLICY_NS" \
     --arg lblRun "$LBL_RUN" \
     --arg lblExpires "$LBL_EXPIRES" \
+    --arg lblRunNow "$LBL_RUNNOW" \
     --arg lblExempt "$LBL_EXEMPT" \
     --arg runId "$RUN_ID" \
     '
@@ -396,6 +400,10 @@ evaluate() {
             hasExport:    ($l | has($lblExport)),
             exportProfile:($l[$lblExport] // ""),
             exempt:       (($l[$lblExempt] // "") | ascii_downcase == "true"),
+            # Observed on K10 9.0.3: set on a manual run once, which the UI
+            # shows as manual. With no expiresAt label the UI shows
+            # No expiration, where a scheduled run shows N/A. Informational.
+            runNow:        (($l[$lblRunNow] // "") | ascii_downcase == "true"),
             actionTime:    (.status.actionTime // null),
             scheduledTime: (.status.scheduledTime // null),
             created:       .metadata.creationTimestamp,
@@ -507,7 +515,7 @@ write_reports() {
   cp "$WORKDIR/decisions.jsonl" "$REPORT_JSONL"
 
   {
-    printf 'run_id,decision,reason,rpc_name,state,app_namespace,app_name,app_type,policy_name,policy_exists,on_demand,kind,ref_time,age_days,rank,logical_bytes,physical_bytes,restorepoint,expires_at,expiry_state\n'
+    printf 'run_id,decision,reason,rpc_name,state,app_namespace,app_name,app_type,policy_name,policy_exists,on_demand,kind,ref_time,age_days,rank,logical_bytes,physical_bytes,restorepoint,expires_at,expiry_state,run_now\n'
     jq -r '[
         .runId, .decision, .reason, .name, .state, .appNamespace, .appName, .appType,
         .policyName, (.policyExists|tostring), (.onDemand|tostring), .kind,
@@ -515,7 +523,7 @@ write_reports() {
         (if .hasLogicalSize  then (.logicalSizeBytes|tostring)  else "" end),
         (if .hasPhysicalSize then (.physicalSizeBytes|tostring) else "" end),
         (if .rpNamespace == "" then "" else .rpNamespace + "/" + .rpName end),
-        .expiresAt, .expiryState
+        .expiresAt, .expiryState, (.runNow|tostring)
       ] | @csv' "$WORKDIR/decisions.jsonl"
   } > "$REPORT_CSV"
 
@@ -536,6 +544,8 @@ summarize() {
   NO_EXPIRY_KEPT=$(jq -s --argjson r "$RETENTION_DAYS" '[.[] | select(.kind=="snapshot" and .expiryState=="none"
                            and .decision=="KEEP" and .ageDays != null
                            and .ageDays > $r)] | length' "$WORKDIR/decisions.jsonl")
+  MANUAL_UNLIM=$(jq -s '[.[] | select(.kind=="snapshot" and .runNow and .expiryState=="none")] | length' "$WORKDIR/decisions.jsonl")
+  MANUAL_UNLIM_CAND=$(jq -s '[.[] | select(.kind=="snapshot" and .runNow and .expiryState=="none" and .decision=="DELETE")] | length' "$WORKDIR/decisions.jsonl")
   SIZE_UNKNOWN=$(jq -s '[.[] | select(.decision=="DELETE" and (.hasPhysicalSize | not))]
                         | length' "$WORKDIR/decisions.jsonl")
 
@@ -560,6 +570,7 @@ summarize() {
     echo " Deletion candidates              : $CANDIDATES"
     echo " Candidate physical size          : $CANDIDATE_BYTES bytes$([[ $SIZE_UNKNOWN -gt 0 ]] && echo " ($SIZE_UNKNOWN candidate(s) with unknown size)" || echo '')"
     echo " Snapshots with no expiry                                     : $NO_EXPIRY, of which $NO_EXPIRY_CAND candidate(s)"
+    echo "   manual runs with no expiration (UI: No expiration)           : $MANUAL_UNLIM, of which $MANUAL_UNLIM_CAND candidate(s)"
     echo "   no expiry, past retention but protected by a guard           : $NO_EXPIRY_KEPT"
     echo "--------------------------------------------------------------"
     echo " KEEP decisions by reason:"

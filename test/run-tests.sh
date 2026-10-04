@@ -217,6 +217,28 @@ build_fixtures() {
       rp("rpc-nx-export";     "";           $a; null;                    false; true)]}' \
     > "$WORK/fixtures/rpc_noexpiry_delete.json"
 
+  # Observed on K10 9.0.3: a manual "run once" carries k10.kasten.io/isRunNow
+  # and, with no expiresAt label, the UI shows "No expiration". A scheduled
+  # run has neither and the UI shows "N/A".
+  jq -n --arg a "$(ago 30)" --arg b "$(ago 1)" '
+    def rp($n; $ts; $run; $exp):
+      { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
+        metadata:{ name:$n, creationTimestamp:$ts,
+          labels:( { "k10.kasten.io/appName":"rnapp",
+                     "k10.kasten.io/appNamespace":"prod",
+                     "k10.kasten.io/policyName":"daily-prod" }
+                   + (if $run then {"k10.kasten.io/isRunNow":"true"} else {} end)
+                   + (if $exp == null then {} else {"k10.kasten.io/expiresAt":$exp} end) ) },
+        spec:null,
+        status:{ state:"Bound", actionTime:$ts,
+                 restorePointRef:{name:("rp-"+$n),namespace:"prod"} } };
+    {apiVersion:"v1",kind:"List",items:[
+      rp("rpc-rn-recent";        $b; false; null),
+      rp("rpc-rn-manual-unlim";  $a; true;  null),
+      rp("rpc-rn-manual-dated";  $a; true;  "2999-01-01T07-56-00Z"),
+      rp("rpc-rn-scheduled";     $a; false; null)]}' \
+    > "$WORK/fixtures/rpc_runnow.json"
+
   # "gone-policy" is deliberately absent from this list
   jq -n '{apiVersion:"v1",kind:"List",items:[
     {metadata:{name:"daily-prod",namespace:"kasten-io"}},
@@ -666,6 +688,18 @@ assert_eq "DELETE snapshot-past-threshold" "$(decision_of rpc-nx-policy)" "with 
 reset_reports
 RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --require-unbound --orphan-policy-only || true
 assert_eq "1" "$(grep -c 'past retention but protected' "$WORK"/reports/*.summary.txt || true)" "the summary reports no-expiry snapshots kept by a guard"
+
+head_ "Case 33: manual runs with no expiration are told apart from N/A"
+reset_reports
+RPC_FIXTURE=rpc_runnow.json run -d 7 || true
+assert_eq "true"  "$(jq -r 'select(.name=="rpc-rn-manual-unlim") | .runNow' "$(latest_report)")" "a run-now object is flagged manual"
+assert_eq "false" "$(jq -r 'select(.name=="rpc-rn-scheduled")    | .runNow' "$(latest_report)")" "a scheduled object is not"
+assert_eq "true"  "$(csv_field rpc-rn-manual-unlim run_now)" "the CSV carries run_now"
+assert_eq "false" "$(csv_field rpc-rn-scheduled run_now)"    "the CSV carries run_now for a scheduled object"
+assert_eq "1" "$(grep -c 'manual runs with no expiration.*: 1, of which 1 candidate' "$WORK"/reports/*.summary.txt || true)" \
+  "the summary counts exactly the manual run with no expiration"
+# flag only: same candidates as before the flag existed
+assert_eq "rpc-rn-manual-dated rpc-rn-manual-unlim rpc-rn-scheduled" "$(candidates)" "the flag does not change the candidate list"
 
 # --------------------------------- Summary -----------------------------------
 printf '\n\033[1mSummary: %d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"

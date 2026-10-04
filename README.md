@@ -141,7 +141,7 @@ metrics file is not refreshed.
 |---|---|
 | Kasten 9.0.3 | **Verified in a lab.** The `exportProfile` discriminator behaves as assumed, and a control dry-run classified a real inventory exactly as the labels dictate |
 | Kasten 8.5.x | **Not verified.** Nothing from the 9.0.3 run transfers |
-| Expiry label | **Observed on 9.0.3, read-only.** The expiry is the label `k10.kasten.io/expiresAt` (`spec` is `null`), absent when no expiry is set, with hyphens in place of the time colons. `N/A` and `No Expiration` cannot be told apart, and 8.5.x is **not verified**. `--include-no-expiry` was exercised in dry-run only, never with `--apply`. **[validate in a lab]** |
+| Expiry label | **Observed on 9.0.3, read-only.** The expiry is the label `k10.kasten.io/expiresAt` (`spec` is `null`), absent when no expiry is set, with hyphens in place of the time colons. A manual run (`k10.kasten.io/isRunNow=true`) with no expiry label is the `No expiration` of the UI, a scheduled one is `N/A`: observed over 12 snapshots, 8.5.x **not verified**. `--include-no-expiry` was exercised in dry-run only, never with `--apply`. **[validate in a lab]** |
 | Candidate size | **Not verified.** `status.physicalSizeBytes` was absent from every object of the validation cluster, which held no volume-backed restore points. Sizes are reported as unknown rather than as zero, and the figure is never a promise of reclaimable space: what the storage layer reports varies by CSI driver |
 
 Section 9 of the runbook records what was checked, and what still is not. Until
