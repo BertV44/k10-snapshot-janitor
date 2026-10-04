@@ -55,7 +55,7 @@ A snapshot older than X days is **not** necessarily an orphan. A legitimate GFS 
 
 ### The native mechanism, for reference
 
-[available] The K10 Garbage Collector already cleans up the `RestorePointContents` of manual backups whose `spec.expiresAt` has **passed** (settable through the API or the manual snapshot page in the UI).
+[available] The K10 Garbage Collector already cleans up the `RestorePointContents` of manual backups whose expiry has **passed** (settable through the API or the manual snapshot page in the UI).
 
 **[unverified]** A restore point presents three distinct expiry states, and only one of them is ever collected:
 
@@ -66,16 +66,18 @@ A snapshot older than X days is **not** necessarily an orphan. A legitimate GFS 
 | unlimited retention, shown as `No Expiration` | no, it is explicitly kept forever |
 
 `N/A` and `No Expiration` are what the restore point *displays*. Whether
-`spec.expiresAt` literally carries those strings, or is simply absent in both
-cases, has not been checked against the CRD schema — a field typed as a
-timestamp could not hold them. [validate in a lab] before relying on the exact
-API representation.
+the expiry carries those strings, or is simply absent in both cases, is not
+settled: on K10 9.0.3 the expiry is the label `k10.kasten.io/expiresAt` (not
+`spec`, which is `null`), absent when no expiry is set, and a label value
+cannot hold the `N/A` or `No Expiration` display strings. Observed on a lab
+(4 of 61 RestorePointContents carried it); [unverified] in the Kasten
+documentation and on 8.5.x, [validate in a lab].
 
 This script covers what the GC does not: restore points it will never reclaim
 because no expiry is set or because retention is explicitly unlimited, those
 from deleted policies, and those of applications removed from the cluster.
 
-The script reads `spec.expiresAt` for **flagging only**, never for a decision. `expiry_state` is `none` (absent, null or empty), `set` (a parsable date) or `unparseable` (any other string). The summary, the CSV/JSONL and `k10_janitor_no_expiry_snapshots_total` expose it, so snapshots the GC will never reclaim are visible, on-demand or policy-created alike. `N/A` and `No Expiration` cannot be told apart yet: **[unverified]**, **[validate in a lab]**. A deletion rule based on the expiry would widen the scope and needs a separate opt-in. If one is ever added, the safe rule
+The script reads the `k10.kasten.io/expiresAt` label for **flagging only**, never for a decision. Its value looks like `2026-09-30T07-56-00Z` (hyphens in place of the time colons, since a label value cannot hold them) and is converted before parsing. `expiry_state` is `none` (label absent or empty), `set` (a parsable date) or `unparseable` (any other string). The summary, the CSV/JSONL and `k10_janitor_no_expiry_snapshots_total` expose it, so snapshots the GC will never reclaim are visible, on-demand or policy-created alike. `N/A` and `No Expiration` cannot be told apart yet: **[unverified]**, **[validate in a lab]**. A deletion rule based on the expiry would widen the scope and needs a separate opt-in. If one is ever added, the safe rule
 is the one already applied to timestamps: **anything that is not a parsable
 date resolves to `KEEP`**. That holds whichever representation turns out to be
 the real one.

@@ -61,6 +61,7 @@ readonly LBL_APPTYPE="k10.kasten.io/appType"
 readonly LBL_POLICY="k10.kasten.io/policyName"
 readonly LBL_POLICY_NS="k10.kasten.io/policyNamespace"
 readonly LBL_RUN="k10.kasten.io/runActionName"
+readonly LBL_EXPIRES="k10.kasten.io/expiresAt"
 # Exemption label key. Overridable through --exempt-label only, and
 # deliberately NOT from the environment: the CronJob mounts its ConfigMap with
 # envFrom, so any key added there becomes an environment variable. An
@@ -80,7 +81,7 @@ REQUIRE_UNBOUND=0         # 1 = only target RPC whose application is gone
 ORPHAN_POLICY_ONLY=0      # 1 = only target RPC with no policy, or a deleted one
 POLICY_COUNT="?"          # K10 policies read, "?" if the read failed
 OVER_CAP=0                # 1 = candidates beyond --max-deletions
-NO_EXPIRY=0               # local snapshots with no spec.expiresAt (flag only)
+NO_EXPIRY=0               # local snapshots with no expiresAt label (flag only)
 NO_EXPIRY_CAND=0          # of which deletion candidates
 CANDIDATE_BYTES=0         # physical size reported for the deletion candidates
 SIZE_UNKNOWN=0            # candidates with no usable physicalSizeBytes
@@ -348,6 +349,7 @@ evaluate() {
     --arg lblPolicy "$LBL_POLICY" \
     --arg lblPolicyNs "$LBL_POLICY_NS" \
     --arg lblRun "$LBL_RUN" \
+    --arg lblExpires "$LBL_EXPIRES" \
     --arg lblExempt "$LBL_EXEMPT" \
     --arg runId "$RUN_ID" \
     '
@@ -388,11 +390,13 @@ evaluate() {
             actionTime:    (.status.actionTime // null),
             scheduledTime: (.status.scheduledTime // null),
             created:       .metadata.creationTimestamp,
-            # Informational only, never an input to the decision. Whether
-            # "no expiry" is an absent field, null or an empty string is
-            # [unverified]: all three read as none. Any other non-date string
-            # (for example the UI label N/A) reads as unparseable.
-            expiresAt:     (if (.spec.expiresAt | type) == "string" then .spec.expiresAt else "" end),
+            # Informational only, never an input to the decision. Observed on
+            # K10 9.0.3: the expiry is the label above, absent when no expiry
+            # is set, and spec is null. Its value has the time colons replaced
+            # by hyphens (label values cannot hold colons). Absent or empty
+            # reads as none, any other non-date string as unparseable.
+            # [unverified] on 8.5.x and against the Kasten documentation.
+            expiresAt:     (if ($l[$lblExpires] | type) == "string" then $l[$lblExpires] else "" end),
             # Absent, null, non-numeric and negative all count as "unknown",
             # never as a real zero. Keeping a string out of the sum also
             # matters because jq add concatenates strings instead of failing.
@@ -415,7 +419,9 @@ evaluate() {
         | .refTime = (.actionTime // .scheduledTime // .created)
         | .refEpoch = (.refTime | to_epoch)
         | .expiryState = (if .expiresAt == "" then "none"
-                          elif (.expiresAt | to_epoch) == null then "unparseable"
+                          elif (.expiresAt
+                                | sub("T(?<h>[0-9]{2})-(?<m>[0-9]{2})-(?<s>[0-9]{2})Z$"; "T\(.h):\(.m):\(.s)Z")
+                                | to_epoch) == null then "unparseable"
                           else "set" end)
         | .ageDays  = (if .refEpoch == null then null
                        else (($NOW - .refEpoch) / 86400 * 100 | floor) / 100 end)
@@ -535,7 +541,7 @@ summarize() {
     echo "   of which exports (never purged): $EXPORTS"
     echo " Deletion candidates              : $CANDIDATES"
     echo " Candidate physical size          : $CANDIDATE_BYTES bytes$([[ $SIZE_UNKNOWN -gt 0 ]] && echo " ($SIZE_UNKNOWN candidate(s) with unknown size)" || echo '')"
-    echo " Snapshots with no expiry (flag only, GC never reclaims them) : $NO_EXPIRY, of which $NO_EXPIRY_CAND candidate(s)"
+    echo " Snapshots with no expiry (flag only)                         : $NO_EXPIRY, of which $NO_EXPIRY_CAND candidate(s)"
     echo "--------------------------------------------------------------"
     echo " KEEP decisions by reason:"
     # Aggregated in jq rather than 'sort | uniq -c | sort -rn | sed': that

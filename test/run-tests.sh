@@ -167,25 +167,28 @@ build_fixtures() {
         logicalSizeBytes:0, physicalSizeBytes:0, restorePointRef:null } }]}' \
     > "$WORK/fixtures/rpc_ts_numeric.json"
 
-  # Expiry states. The representation of "no expiry" in spec.expiresAt is not
-  # verified against the API, so four shapes are covered: absent, empty,
-  # a real date, and a non-date string such as the UI "N/A".
+  # Expiry states. Observed on K10 9.0.3: the expiry is the LABEL
+  # k10.kasten.io/expiresAt, absent when no expiry is set, with the colons of
+  # the time replaced by hyphens (2026-09-30T07-56-00Z) since a label value
+  # cannot hold them. spec is null. Not checked on 8.5.x.
   jq -n --arg a "$(ago 30)" --arg b "$(ago 1)" '
-    def rp($n; $app; $pol; $ts; $spec):
+    def rp($n; $app; $pol; $ts; $exp):
       { apiVersion:"apps.kio.kasten.io/v1alpha1", kind:"RestorePointContent",
         metadata:{ name:$n, creationTimestamp:$ts,
           labels:( { "k10.kasten.io/appName":$app,
                      "k10.kasten.io/appNamespace":"prod" }
-                   + (if $pol == "" then {} else {"k10.kasten.io/policyName":$pol} end) ) },
-        spec:$spec,
+                   + (if $pol == "" then {} else {"k10.kasten.io/policyName":$pol} end)
+                   + (if $exp == null then {} else {"k10.kasten.io/expiresAt":$exp} end) ) },
+        spec:null,
         status:{ state:"Bound", actionTime:$ts,
                  restorePointRef:{name:("rp-"+$n),namespace:"prod"} } };
     {apiVersion:"v1",kind:"List",items:[
-      rp("rpc-exp-recent";   "expapp"; "daily-prod"; $b; {}),
-      rp("rpc-exp-absent";   "expapp"; "daily-prod"; $a; {}),
-      rp("rpc-exp-empty";    "expapp"; "";           $a; {expiresAt:""}),
-      rp("rpc-exp-date";     "expapp"; "daily-prod"; $a; {expiresAt:"2999-01-01T00:00:00Z"}),
-      rp("rpc-exp-na";       "expapp"; "daily-prod"; $a; {expiresAt:"N/A"})]}' \
+      rp("rpc-exp-recent";   "expapp"; "daily-prod"; $b; null),
+      rp("rpc-exp-absent";   "expapp"; "daily-prod"; $a; null),
+      rp("rpc-exp-empty";    "expapp"; "";           $a; ""),
+      rp("rpc-exp-date";     "expapp"; "daily-prod"; $a; "2999-01-01T07-56-00Z"),
+      rp("rpc-exp-colon";    "expapp"; "daily-prod"; $a; "2999-01-01T07:56:00Z"),
+      rp("rpc-exp-na";       "expapp"; "daily-prod"; $a; "N-A")]}' \
     > "$WORK/fixtures/rpc_expiry.json"
 
   # "gone-policy" is deliberately absent from this list
@@ -600,10 +603,11 @@ RPC_FIXTURE=rpc_expiry.json run -d 7 --metrics-file "$WORK/expiry.prom" || true
 assert_eq "none"        "$(jq -r 'select(.name=="rpc-exp-absent") | .expiryState' "$(latest_report)")" "absent expiresAt is flagged none"
 assert_eq "none"        "$(jq -r 'select(.name=="rpc-exp-empty")  | .expiryState' "$(latest_report)")" "empty expiresAt is flagged none"
 assert_eq "set"         "$(jq -r 'select(.name=="rpc-exp-date")   | .expiryState' "$(latest_report)")" "a parsable date is flagged set"
+assert_eq "set"         "$(jq -r 'select(.name=="rpc-exp-colon")  | .expiryState' "$(latest_report)")" "a colon-form date is flagged set too"
 assert_eq "unparseable" "$(jq -r 'select(.name=="rpc-exp-na")     | .expiryState' "$(latest_report)")" "a non-date string is flagged unparseable"
 assert_eq "none"        "$(csv_field rpc-exp-absent expiry_state)" "the CSV carries the expiry state"
 # flag only: the decisions are exactly what they were without the flag
-assert_eq "rpc-exp-absent rpc-exp-date rpc-exp-empty rpc-exp-na" "$(candidates)" "the flag does not change the candidate list"
+assert_eq "rpc-exp-absent rpc-exp-colon rpc-exp-date rpc-exp-empty rpc-exp-na" "$(candidates)" "the flag does not change the candidate list"
 assert_eq "KEEP within-retention" "$(decision_of rpc-exp-recent)" "the recent point is still kept"
 assert_eq "3" "$(awk '/^k10_janitor_no_expiry_snapshots_total /{print $2}' "$WORK/expiry.prom" 2>/dev/null)" \
   "the metric counts the no-expiry snapshots"
