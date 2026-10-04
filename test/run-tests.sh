@@ -749,22 +749,23 @@ assert_eq "1" "$(grep -c 'manual runs with no expiration.*: 1, of which 1 candid
 # flag only: same candidates as before the flag existed
 assert_eq "rpc-rn-manual-dated rpc-rn-manual-unlim rpc-rn-scheduled" "$(candidates)" "the flag does not change the candidate list"
 
-head_ "Case 34: a N/A snapshot is released only beyond the retention horizon of its policy"
+head_ "Case 34: a N/A snapshot is treated like No expiration, on age alone"
 reset_reports
 RPC_FIXTURE=rpc_horizon.json POLICY_FIXTURE=policies_ret.json run -d 1 --require-unbound --orphan-policy-only || true
 assert_eq "" "$(candidates)" "without the flag nothing is released in conservative mode"
 reset_reports
 RPC_FIXTURE=rpc_horizon.json POLICY_FIXTURE=policies_ret.json run -d 1 --require-unbound --orphan-policy-only --include-no-expiry || true
-assert_eq "rpc-hz-daily-out rpc-hz-gone rpc-hz-manual rpc-hz-ondemand rpc-hz-running rpc-hz-weekly-out" "$(candidates)" \
-  "only the snapshots past their horizon, the manual, the on-demand and the policy-less are released"
-assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-weekly-in)" "a N/A inside its weekly horizon is healthy and kept"
-assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-yearly-in)" "a N/A inside its yearly horizon is kept"
-assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-bare)"      "a policy with no retention gives no horizon, so it is kept"
-assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-hz-paused)" "a snapshot of a paused policy is not released: retention is not being applied"
-assert_eq "DELETE snapshot-past-threshold"  "$(decision_of rpc-hz-running)" "paused false behaves like a running policy"
+assert_eq "rpc-hz-bare rpc-hz-daily-out rpc-hz-gone rpc-hz-manual rpc-hz-ondemand rpc-hz-paused rpc-hz-running rpc-hz-weekly-in rpc-hz-weekly-out rpc-hz-yearly-in" "$(candidates)" \
+  "every no-expiry snapshot past the threshold is released, N/A or not, whatever its policy horizon"
+assert_eq "KEEP within-retention" "$(decision_of rpc-hz-recent)" "the recent point is still kept"
+# the horizon stays in the report as information, it no longer gates anything
 assert_eq "3"    "$(jq -r 'select(.name=="rpc-hz-daily-out")  | .policyHorizonDays' "$(latest_report)")" "daily:2 gives a 3 day horizon"
 assert_eq "35"   "$(jq -r 'select(.name=="rpc-hz-weekly-out") | .policyHorizonDays' "$(latest_report)")" "weekly:4 gives a 35 day horizon"
 assert_eq "null" "$(jq -r 'select(.name=="rpc-hz-bare")       | .policyHorizonDays' "$(latest_report)")" "no retention means no horizon"
+assert_eq "null" "$(jq -r 'select(.name=="rpc-hz-paused")     | .policyHorizonDays' "$(latest_report)")" "a paused policy gives no horizon"
+# warning line: candidates a policy would still legitimately keep (weekly-in, yearly-in)
+assert_eq "1" "$(grep -c 'candidates still inside their policy retention.*: 2$' "$WORK"/reports/*.summary.txt || true)" \
+  "the summary counts the candidates still inside their policy retention"
 
 # --------------------------------- Summary -----------------------------------
 printf '\n\033[1mSummary: %d passed, %d failed, %d skipped\033[0m\n' "$PASS" "$FAIL" "$SKIP"

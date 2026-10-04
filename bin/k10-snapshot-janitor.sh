@@ -89,6 +89,7 @@ NO_EXPIRY=0               # local snapshots with no expiresAt label (flag only)
 NO_EXPIRY_CAND=0          # of which deletion candidates
 MANUAL_UNLIM=0           # manual runs (isRunNow) with no expiry label
 MANUAL_UNLIM_CAND=0       # of which deletion candidates
+NO_EXPIRY_INSIDE=0        # candidates a policy retention would still keep (information)
 NO_EXPIRY_KEPT=0          # of which past retention but kept by a guard
 CANDIDATE_BYTES=0         # physical size reported for the deletion candidates
 SIZE_UNKNOWN=0            # candidates with no usable physicalSizeBytes
@@ -309,11 +310,10 @@ fetch_data() {
   if "$CLI" -n "$K10_NAMESPACE" get "$POLICY_CRD" -o json > "$WORKDIR/policies.json" 2>/dev/null; then
     jq '[.items[].metadata.name]' "$WORKDIR/policies.json" > "$WORKDIR/policy_names.json"
     # Retention horizon per policy, in days: how long the policy can legitimately
-    # keep a scheduled snapshot. Observed on K10 9.0.3: spec.retention holds a
+    # keep a scheduled snapshot, for information only. Observed on K10 9.0.3: spec.retention holds a
     # count per tier. Horizon = (largest tier count + 1) * tier period, the extra
     # period being slack. No usable retention gives null, meaning unknown. So does
-    # a paused policy (spec.paused is a boolean in the policy CRD): it no longer
-    # applies its retention, so an old snapshot is not a leftover.
+    # a paused policy (spec.paused is a boolean in the policy CRD).
     # [unverified] in the Kasten documentation and on 8.5.x.
     jq 'def tier($r; $k; $p):
           if (($r[$k] | type) == "number") and $r[$k] > 0 then ($r[$k] + 1) * $p else empty end;
@@ -476,16 +476,11 @@ evaluate() {
         | .policyExists = (if .policyName == "" then false
                            elif $policies == null then true
                            else (.policyName as $p | ($policies | index($p)) != null) end)
-        # A scheduled snapshot with no expiry is healthy while it sits inside
-        # what its policy retention can produce. It is eligible for
-        # --include-no-expiry only beyond that horizon. A manual run, an
-        # on-demand one and one whose policy is gone have no retention to
-        # compare against. An unknown horizon is never eligible.
+        # Informational: how long the policy can legitimately keep a scheduled
+        # snapshot. It gates nothing; the summary uses it to warn about
+        # candidates a policy would still keep.
         | .policyHorizonDays = (if .policyName == "" then null
                                 else ($horizons[.policyName] // null) end)
-        | .noExpiryEligible = (if .runNow or .policyName == "" or (.policyExists | not) then true
-                               else (.policyHorizonDays != null and .ageDays != null
-                                     and .ageDays > .policyHorizonDays) end)
       ]
     # rank per application, newest to oldest, over the eligible scope only
     | ( [ .[] | select(.kind == "snapshot" or $includeExports == 1) ]
@@ -521,11 +516,11 @@ evaluate() {
           # and below still applies.
           elif $requireUnbound == 1 and .state != "Unbound"
                and (($includeNoExpiry == 1 and .expiryState == "none"
-                     and .policyName != $drPolicy and .noExpiryEligible) | not) then
+                     and .policyName != $drPolicy) | not) then
             {decision: "KEEP", reason: "still-bound-to-application"}
           elif $orphanPolicyOnly == 1 and .policyExists
                and (($includeNoExpiry == 1 and .expiryState == "none"
-                     and .policyName != $drPolicy and .noExpiryEligible) | not) then
+                     and .policyName != $drPolicy) | not) then
             {decision: "KEEP", reason: "policy-still-active"}
           else
             {decision: "DELETE",
@@ -583,6 +578,10 @@ summarize() {
                            and .ageDays > $r)] | length' "$WORKDIR/decisions.jsonl")
   MANUAL_UNLIM=$(jq -s '[.[] | select(.kind=="snapshot" and .runNow and .expiryState=="none")] | length' "$WORKDIR/decisions.jsonl")
   MANUAL_UNLIM_CAND=$(jq -s '[.[] | select(.kind=="snapshot" and .runNow and .expiryState=="none" and .decision=="DELETE")] | length' "$WORKDIR/decisions.jsonl")
+  NO_EXPIRY_INSIDE=$(jq -s '[.[] | select(.decision=="DELETE" and .expiryState=="none"
+                              and (.runNow | not) and .policyName != ""
+                              and .policyHorizonDays != null
+                              and .ageDays <= .policyHorizonDays)] | length' "$WORKDIR/decisions.jsonl")
   SIZE_UNKNOWN=$(jq -s '[.[] | select(.decision=="DELETE" and (.hasPhysicalSize | not))]
                         | length' "$WORKDIR/decisions.jsonl")
 
@@ -608,6 +607,7 @@ summarize() {
     echo " Candidate physical size          : $CANDIDATE_BYTES bytes$([[ $SIZE_UNKNOWN -gt 0 ]] && echo " ($SIZE_UNKNOWN candidate(s) with unknown size)" || echo '')"
     echo " Snapshots with no expiry                                     : $NO_EXPIRY, of which $NO_EXPIRY_CAND candidate(s)"
     echo "   manual runs with no expiration (UI: No expiration)           : $MANUAL_UNLIM, of which $MANUAL_UNLIM_CAND candidate(s)"
+    echo "   candidates still inside their policy retention               : $NO_EXPIRY_INSIDE"
     echo "   no expiry, past retention but protected by a guard           : $NO_EXPIRY_KEPT"
     echo "--------------------------------------------------------------"
     echo " KEEP decisions by reason:"
