@@ -97,7 +97,7 @@ The conservative mode corresponds to `CONSERVATIVE_MODE: "true"` in the ConfigMa
 
 ### Opt-in: `--include-no-expiry`
 
-Releases a snapshot from `--require-unbound` and `--orphan-policy-only` when it carries no `k10.kasten.io/expiresAt` label, **whether it is on-demand or created by a policy**, provided it is past `--retention-days` and outside the `--min-keep` guard. A dated expiry, an unparsable one, the exemption label and every export stay protected. It is off by default and the `CronJob` does not use it.
+Releases a snapshot from `--require-unbound` and `--orphan-policy-only` when it carries no `k10.kasten.io/expiresAt` label, **whether it is on-demand or created by a policy**, provided it is past `--retention-days` and outside the `--min-keep` guard. A dated expiry, an unparsable one, the K10 disaster recovery policy (`k10-disaster-recovery-policy`, observed name on 9.0.3, **[unverified]** in the docs), the exemption label and every export stay protected. It is off by default and the `CronJob` does not use it.
 
 **Warning:** a point kept by a GFS policy (monthly, yearly) may well carry no expiry label, since its retention belongs to the policy. Forcing this flag then deletes it despite the policy. Read the dry-run report first: the summary counts the no-expiry snapshots, those that are candidates, and those past retention that a guard still protects. **[unverified]** On K10 9.0.3 a lab held no on-demand snapshot, so on-demand as "no policy label" is a deduction. **[validate in a lab]** before any `--apply`.
 

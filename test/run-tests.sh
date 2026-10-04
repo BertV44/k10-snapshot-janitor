@@ -214,7 +214,8 @@ build_fixtures() {
       rp("rpc-nx-badexpiry";  "";           $a; "N-A";                   false; false),
       rp("rpc-nx-policy";     "daily-prod"; $a; null;                    false; false),
       rp("rpc-nx-exempt";     "";           $a; null;                    true;  false),
-      rp("rpc-nx-export";     "";           $a; null;                    false; true)]}' \
+      rp("rpc-nx-export";     "";           $a; null;                    false; true),
+      rp("rpc-nx-dr";         "k10-disaster-recovery-policy"; $a; null;  false; false)]}' \
     > "$WORK/fixtures/rpc_noexpiry_delete.json"
 
   # Observed on K10 9.0.3: a manual "run once" carries k10.kasten.io/isRunNow
@@ -243,6 +244,10 @@ build_fixtures() {
   jq -n '{apiVersion:"v1",kind:"List",items:[
     {metadata:{name:"daily-prod",namespace:"kasten-io"}},
     {metadata:{name:"weekly-dev",namespace:"kasten-io"}}]}' > "$WORK/fixtures/policies.json"
+
+  jq -n '{apiVersion:"v1",kind:"List",items:[
+    {metadata:{name:"daily-prod",namespace:"kasten-io"}},
+    {metadata:{name:"k10-disaster-recovery-policy",namespace:"kasten-io"}}]}' > "$WORK/fixtures/policies_dr.json"
 
   # Empty list: reachable with a wrong --k10-namespace. RestorePointContent is
   # cluster-scoped, so the namespaced policy query succeeds with zero results.
@@ -670,6 +675,7 @@ RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --require-unbound --orphan-policy-
 assert_eq "rpc-nx-policy rpc-nx-target" "$(candidates)" "with the flag, the no-expiry snapshots are candidates, on-demand or policy"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-dated)"     "a dated expiry is still protected"
 assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-badexpiry)" "an unparsable expiry is still protected"
+assert_eq "KEEP still-bound-to-application" "$(decision_of rpc-nx-dr)"        "the K10 disaster recovery policy is never released by the flag"
 assert_eq "KEEP labelled-exempt"            "$(decision_of rpc-nx-exempt)"    "the exemption label still wins"
 assert_eq "KEEP export-restorepoint"        "$(decision_of rpc-nx-export)"    "an export is still never deleted"
 assert_eq "KEEP within-retention"           "$(decision_of rpc-nx-recent)"    "the recent point is still kept"
@@ -677,6 +683,11 @@ reset_reports
 RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --require-unbound --orphan-policy-only --include-no-expiry --apply && rc=0 || rc=$?
 assert_eq "0" "$rc" "exit code 0 under --apply"
 assert_eq "rpc-nx-policy rpc-nx-target" "$(sed 's/.* //' "$WORK/deleted.log" 2>/dev/null | sort | tr '\n' ' ' | sed 's/ $//')" "--apply deletes those two objects only"
+# the DR policy stays out of reach with --orphan-policy-only alone too, once
+# its policy is known to exist
+reset_reports
+RPC_FIXTURE=rpc_noexpiry_delete.json POLICY_FIXTURE=policies_dr.json run -d 7 --orphan-policy-only --include-no-expiry || true
+assert_eq "KEEP policy-still-active" "$(decision_of rpc-nx-dr)" "the DR policy snapshot is kept under --orphan-policy-only"
 # --orphan-policy-only alone: an active policy normally protects its snapshots
 reset_reports
 RPC_FIXTURE=rpc_noexpiry_delete.json run -d 7 --orphan-policy-only || true

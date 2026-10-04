@@ -63,6 +63,9 @@ readonly LBL_POLICY_NS="k10.kasten.io/policyNamespace"
 readonly LBL_RUN="k10.kasten.io/runActionName"
 readonly LBL_EXPIRES="k10.kasten.io/expiresAt"
 readonly LBL_RUNNOW="k10.kasten.io/isRunNow"
+# Observed on K10 9.0.3 as the policyName of the disaster recovery snapshots.
+# --include-no-expiry never releases it. [unverified] in the Kasten docs.
+readonly DR_POLICY="k10-disaster-recovery-policy"
 # Exemption label key. Overridable through --exempt-label only, and
 # deliberately NOT from the environment: the CronJob mounts its ConfigMap with
 # envFrom, so any key added there becomes an environment variable. An
@@ -143,8 +146,9 @@ SELECTION
       --include-no-expiry    Also target snapshots that carry no expiry label, whether
                              on-demand or created by a policy, even when
                              --require-unbound or --orphan-policy-only would protect
-                             them. Dated ones stay protected. A policy GFS point
-                             may have no expiry: use with care. Not used by the CronJob
+                             them. Dated ones and the K10 disaster recovery policy
+                             stay protected. A policy GFS point may have no expiry:
+                             use with care. Not used by the CronJob
       --include-namespace NS Restrict to this application namespace (repeatable)
       --exclude-namespace NS Exclude this application namespace (repeatable)
       --exclude-policy NAME  Exclude RPC created by this policy (repeatable)
@@ -363,6 +367,7 @@ evaluate() {
     --arg lblRun "$LBL_RUN" \
     --arg lblExpires "$LBL_EXPIRES" \
     --arg lblRunNow "$LBL_RUNNOW" \
+    --arg drPolicy "$DR_POLICY" \
     --arg lblExempt "$LBL_EXEMPT" \
     --arg runId "$RUN_ID" \
     '
@@ -482,13 +487,16 @@ evaluate() {
           elif .rank >= 0 and .rank < $minKeep then
             {decision: "KEEP", reason: "min-keep-guard"}
           # --include-no-expiry only relaxes these two guards, and only for a
-          # snapshot with no expiry. It adds no DELETE branch: every other
-          # guard above and below still applies.
+          # snapshot with no expiry that does not belong to the K10 disaster
+          # recovery policy. It adds no DELETE branch: every other guard above
+          # and below still applies.
           elif $requireUnbound == 1 and .state != "Unbound"
-               and (($includeNoExpiry == 1 and .expiryState == "none") | not) then
+               and (($includeNoExpiry == 1 and .expiryState == "none"
+                     and .policyName != $drPolicy) | not) then
             {decision: "KEEP", reason: "still-bound-to-application"}
           elif $orphanPolicyOnly == 1 and .policyExists
-               and (($includeNoExpiry == 1 and .expiryState == "none") | not) then
+               and (($includeNoExpiry == 1 and .expiryState == "none"
+                     and .policyName != $drPolicy) | not) then
             {decision: "KEEP", reason: "policy-still-active"}
           else
             {decision: "DELETE",

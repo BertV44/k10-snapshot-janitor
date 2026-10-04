@@ -82,7 +82,7 @@ the command line. `--wait-retire N` waits up to N seconds for the triggered
 | `--max-deletions N` | Under `--apply`, aborts with exit code 2 if candidates exceed N, deleting nothing. A dry-run reports the overflow and still exits 0 |
 | Exemption label | `k10-janitor/exempt=true` on a `RestorePointContent` excludes it permanently |
 | Exports excluded | Exported restore points are never candidates in normal operation |
-| `--include-no-expiry` | Off by default. Releases only the `--require-unbound` and `--orphan-policy-only` guards, and only for a snapshot with no expiry label. Dated or unparsable expiry, the exemption label, `--min-keep` and exports stay protected |
+| `--include-no-expiry` | Off by default. Releases only the `--require-unbound` and `--orphan-policy-only` guards, and only for a snapshot with no expiry label. Dated or unparsable expiry, the K10 disaster recovery policy, the exemption label, `--min-keep` and exports stay protected |
 | Unparsable timestamp | Always resolves to `KEEP`, including a numeric offset such as `+02:00`, or a value that is not a string at all |
 | `--min-keep 0` | Rejected outright with exit 1: no application may be left without a restore point |
 | Missing policy data | If `--orphan-policy-only` is requested and the policy list is unreadable or empty, the run aborts with exit 3 rather than dropping the filter |
@@ -113,7 +113,7 @@ procedure.
 ./test/run-tests.sh
 ```
 
-123 assertions, entirely offline: fixtures and a stub CLI are generated on the
+131 assertions, entirely offline: fixtures and a stub CLI are generated on the
 fly, no cluster is contacted. A skipped case is fatal — a suite that quietly
 runs at 97% is worse than one that fails, so `python3` and `pyyaml` are
 required for the manifest checks.
